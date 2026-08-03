@@ -221,13 +221,27 @@ Nunca pegues la API key o el secret en el chat -- se guardan solo como
 variables de entorno en tu maquina. El script firma las conexiones,
 loguea cada mensaje crudo a `data/live_odds_log.csv`, reconecta con
 backoff si se cae, y **no coloca ninguna orden** (es de solo lectura).
-Falta un dato que solo se puede conseguir inspeccionando el trafico de la
-app (o revisando si Binance publico un listado de topics mas reciente
-que mi conocimiento): el `TOPIC_NAME` exacto del mercado "BTC Up or Down
-5m" -- esta marcado con un TODO explicito en el archivo. Una vez que
-acumules suficientes horas/dias de datos con eso corriendo, comparteme el
-CSV y hago el analisis de mispricing real (reemplazando la aproximacion
-Gaussiana de `option_edge_analysis.py` por datos de cuotas reales).
+
+**Sobre el topic:** un link compartido de `web3.binance.com` que pasaste
+confirmo que cada ronda de 5 min es su propio mercado, identificado como
+`btc-updown-5m-<timestamp_unix>`, donde el timestamp cae justo en un
+limite de 5 minutos (el ejemplo `...-1785738000` = 2026-08-03 06:20:00
+UTC exacto). El script ahora **calcula ese id solo**, por ronda, en vez
+de necesitar un valor fijo pegado a mano (funcion `round_market_id()`).
+No pude confirmar el formato exacto capturando el frame real de
+suscripcion -- la pagina esta detras de un desafio anti-bot de AWS WAF
+que no pude pasar desde aca -- asi que es la mejor conjetura educada, no
+un dato verificado. El primer minuto corriendo el script te va a decir si
+acerto: si solo ves trafico de PING/conexion y ningun dato de precio,
+proba cambiar `MARKET_ID_USES_END_TIME = False` en el archivo (por si el
+id usa el inicio de la ronda en vez del final), o consegui el topic real
+inspeccionando la app/web con una PC y pasalo con
+`export TOPIC_OVERRIDE="el_topic_real"` para saltarte el calculo.
+
+Una vez que acumules suficientes horas/dias de datos con eso corriendo,
+comparteme el CSV y hago el analisis de mispricing real (reemplazando la
+aproximacion Gaussiana de `option_edge_analysis.py` por datos de cuotas
+reales).
 
 ## Como correrlo vos mismo
 
