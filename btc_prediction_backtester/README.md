@@ -197,6 +197,38 @@ mispricing explotable, en vez de la aproximacion que hicimos con
 `option_edge_analysis.py`. Sin la key no se puede avanzar mas en este
 punto especifico.
 
+### `local_odds_logger.py` -- corre en tu dispositivo, no aca
+
+Verifique con la documentacion oficial que el WebSocket de la Binance
+Prediction Markets API vive en `wss://api.binance.com/sapi/wss` -- el
+mismo dominio `api.binance.com` que ya esta bloqueado por geo-restriccion
+desde este sandbox (mismo error 451 que vimos con los datos de precio al
+principio). Ademas requiere autenticacion HMAC-SHA256 firmada con tu API
+key/secret real de Binance (permiso "Prediction Trading" habilitado en tu
+cuenta con fondos) -- no hay endpoint publico de solo lectura para esto.
+
+Por ambas razones, este componente **esta escrito para que lo corras vos
+en tu propio dispositivo**, no en este entorno remoto:
+
+```bash
+pip install websocket-client
+export BINANCE_API_KEY="tu_api_key"
+export BINANCE_API_SECRET="tu_secret_key"
+python3 local_odds_logger.py
+```
+
+Nunca pegues la API key o el secret en el chat -- se guardan solo como
+variables de entorno en tu maquina. El script firma las conexiones,
+loguea cada mensaje crudo a `data/live_odds_log.csv`, reconecta con
+backoff si se cae, y **no coloca ninguna orden** (es de solo lectura).
+Falta un dato que solo se puede conseguir inspeccionando el trafico de la
+app (o revisando si Binance publico un listado de topics mas reciente
+que mi conocimiento): el `TOPIC_NAME` exacto del mercado "BTC Up or Down
+5m" -- esta marcado con un TODO explicito en el archivo. Una vez que
+acumules suficientes horas/dias de datos con eso corriendo, comparteme el
+CSV y hago el analisis de mispricing real (reemplazando la aproximacion
+Gaussiana de `option_edge_analysis.py` por datos de cuotas reales).
+
 ## Como correrlo vos mismo
 
 ```bash
