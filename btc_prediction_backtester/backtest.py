@@ -7,8 +7,14 @@ data strictly before the round starts (no lookahead / no data leakage).
 Data is split into an in-sample half (to look at) and an out-of-sample
 half (to confirm), so we don't fool ourselves with a strategy that only
 looks good by chance on the full dataset.
+
+Also runs a variance-ratio test on 5-minute returns: a principled,
+model-free diagnostic for momentum/mean-reversion in the price series
+itself, independent of any specific hand-tuned rule (helps sanity-check
+whether brute-force rule search is even worth it).
 """
-import math
+import statistics
+
 from collections import namedtuple
 
 import data_fetch
@@ -33,7 +39,6 @@ def build_rounds(candles):
     last_ms = candles[-1]["open_time_ms"]
 
     round_ms = ROUND_SECONDS * 1000
-    # align first boundary to a multiple of 5 minutes
     start = (first_ms // round_ms) * round_ms
     if start < first_ms:
         start += round_ms
@@ -68,23 +73,53 @@ def breakeven_winrate(fee_pct):
     return 1 / (2 - f)
 
 
-def evaluate_strategy(strategy_fn, rounds):
+def evaluate_strategy(strategy_fn, rounds, ctx):
     """Walk forward through rounds, predicting each one from only prior data."""
     history = []
-    closes = []  # closes strictly before current round start
     correct = 0
     total_signals = 0
 
     for r in rounds:
-        pred = strategy_fn(history, closes)
+        pred = strategy_fn(history, ctx, r.start_ms)
         if pred is not None:
             total_signals += 1
             if pred == r.outcome:
                 correct += 1
         history.append(r.outcome)
-        closes.append(r.start_price)
 
     return correct, total_signals
+
+
+def variance_ratio_test(rounds, k=2):
+    """Lo-MacKinlay style variance ratio test on 5-min round returns.
+
+    VR(k) = Var(k-period return) / (k * Var(1-period return))
+    VR ~ 1   -> consistent with a random walk (no exploitable structure)
+    VR < 1   -> mean reversion (moves tend to partially reverse)
+    VR > 1   -> momentum/trending (moves tend to continue)
+
+    This looks at the price series itself, not any specific betting rule,
+    so it's a cleaner way to ask "is there structure here at all?" before
+    trusting any brute-force strategy search.
+    """
+    prices = [rounds[0].start_price] + [r.end_price for r in rounds]
+    rets = [(prices[i] - prices[i - 1]) / prices[i - 1] for i in range(1, len(prices))]
+    n = len(rets)
+    if n < k * 30:
+        return None
+
+    var1 = statistics.pvariance(rets)
+    k_rets = [sum(rets[i : i + k]) for i in range(0, n - k + 1, k)]
+    vark = statistics.pvariance(k_rets)
+    if var1 == 0:
+        return None
+    vr = vark / (k * var1)
+
+    # approximate standard error under the random-walk null (homoskedastic case)
+    m = len(k_rets)
+    se = ((2 * (2 * k - 1) * (k - 1)) / (3 * k * n)) ** 0.5
+    z = (vr - 1) / se if se > 0 else float("nan")
+    return {"k": k, "vr": vr, "z": z, "n_returns": n, "n_k_blocks": m}
 
 
 def run(candles, fee_pct=10.0):
@@ -105,17 +140,31 @@ def run(candles, fee_pct=10.0):
     print(f"Con una comision asumida de {fee_pct:.0f}%, hace falta un win rate > {be*100:.1f}% para ganar en el largo plazo")
     print()
 
+    print("Variance ratio test (estructura del precio en si, sin ninguna regla):")
+    for k in (2, 3, 5, 10):
+        res = variance_ratio_test(rounds, k=k)
+        if res is None:
+            continue
+        verdict = "random walk (VR~1)"
+        if res["z"] > 2:
+            verdict = "MOMENTUM significativo (VR>1, z>2)"
+        elif res["z"] < -2:
+            verdict = "MEAN REVERSION significativo (VR<1, z<-2)"
+        print(f"  k={res['k']:2d}: VR={res['vr']:.3f}  z={res['z']:+.2f}  -> {verdict}")
+    print()
+
+    ctx = strat_module.MarketContext(candles)
     strategies = strat_module.build_default_strategies()
 
-    header = f"{'estrategia':32s} {'IS n':>6s} {'IS win%':>8s} {'OOS n':>6s} {'OOS win%':>9s} {'OOS IC95%':>18s} {'>breakeven?':>12s}"
+    header = f"{'estrategia':40s} {'IS n':>6s} {'IS win%':>8s} {'OOS n':>6s} {'OOS win%':>9s} {'OOS IC95%':>18s} {'>breakeven?':>12s}"
     print(header)
     print("-" * len(header))
 
     results = []
     for strat in strategies:
         name = getattr(strat, "__name__", "unnamed")
-        is_correct, is_total = evaluate_strategy(strat, in_sample)
-        oos_correct, oos_total = evaluate_strategy(strat, out_sample)
+        is_correct, is_total = evaluate_strategy(strat, in_sample, ctx)
+        oos_correct, oos_total = evaluate_strategy(strat, out_sample, ctx)
 
         is_wr = is_correct / is_total * 100 if is_total else float("nan")
         oos_wr = oos_correct / oos_total * 100 if oos_total else float("nan")
@@ -126,7 +175,7 @@ def run(candles, fee_pct=10.0):
 
         ic_str = f"[{lo*100:5.1f}%,{hi*100:5.1f}%]" if oos_total else "n/a"
         flag = "SI (!)" if beats_breakeven else "no"
-        print(f"{name:32s} {is_total:6d} {is_wr:7.1f}% {oos_total:6d} {oos_wr:8.1f}% {ic_str:>18s} {flag:>12s}")
+        print(f"{name:40s} {is_total:6d} {is_wr:7.1f}% {oos_total:6d} {oos_wr:8.1f}% {ic_str:>18s} {flag:>12s}")
 
     print()
     winners = [r for r in results if r[7]]

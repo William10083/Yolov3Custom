@@ -52,9 +52,12 @@ def download(days=45):
     count = 0
     with open(CACHE_FILE, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["open_time_ms", "open", "high", "low", "close", "volume"])
+        writer.writerow(
+            ["open_time_ms", "open", "high", "low", "close", "volume", "taker_buy_base"]
+        )
         for row in fetch_klines(start_ms, end_ms):
-            writer.writerow([row[0], row[1], row[2], row[3], row[4], row[5]])
+            # row[9] = taker buy base asset volume (Binance kline schema)
+            writer.writerow([row[0], row[1], row[2], row[3], row[4], row[5], row[9]])
             count += 1
             if count % 5000 == 0:
                 print(f"  {count} velas descargadas...")
@@ -80,6 +83,7 @@ def load_cached():
                     "low": float(r["low"]),
                     "close": float(r["close"]),
                     "volume": float(r["volume"]),
+                    "taker_buy_base": float(r.get("taker_buy_base", 0.0) or 0.0),
                 }
             )
     rows.sort(key=lambda r: r["open_time_ms"])
