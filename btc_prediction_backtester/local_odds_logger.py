@@ -238,13 +238,98 @@ def ensure_log_file():
     if not os.path.exists(LOG_FILE):
         with open(LOG_FILE, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["polled_at_ms", "market_id", "http_status", "raw_body"])
+            writer.writerow(
+                [
+                    "polled_at_ms",
+                    "market_id",
+                    "http_status",
+                    "api_timestamp",
+                    "best_bid",
+                    "best_ask",
+                    "mid_price",
+                    "raw_body",
+                ]
+            )
+
+
+def _best_bid_ask(order_book_json):
+    """bids are sorted highest-first, asks lowest-first per the docs."""
+    bids = order_book_json.get("bids") or []
+    asks = order_book_json.get("asks") or []
+    best_bid = float(bids[0]["price"]) if bids else None
+    best_ask = float(asks[0]["price"]) if asks else None
+    return best_bid, best_ask
 
 
 def log_snapshot(market_id, resp):
+    api_ts = best_bid = best_ask = mid = None
+    if resp.status_code == 200:
+        try:
+            body = resp.json()
+            api_ts = body.get("timestamp")
+            best_bid, best_ask = _best_bid_ask(body)
+            if best_bid is not None and best_ask is not None:
+                mid = round((best_bid + best_ask) / 2, 4)
+        except (ValueError, KeyError, IndexError):
+            pass
     with open(LOG_FILE, "a", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow([int(time.time() * 1000), market_id, resp.status_code, resp.text[:2000]])
+        writer.writerow(
+            [int(time.time() * 1000), market_id, resp.status_code, api_ts, best_bid, best_ask, mid, resp.text[:2000]]
+        )
+
+
+OUTCOMES_FILE = os.path.join(os.path.dirname(__file__), "data", "round_outcomes.csv")
+
+
+def ensure_outcomes_file():
+    os.makedirs(os.path.dirname(OUTCOMES_FILE), exist_ok=True)
+    if not os.path.exists(OUTCOMES_FILE):
+        with open(OUTCOMES_FILE, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["market_id", "round_start_ms", "round_end_ms", "start_price", "end_price", "outcome"])
+
+
+def resolve_round_outcome(round_start_ms, retries=10, delay_seconds=5):
+    """Determine Up/Down for a finished round using the same public,
+    unauthenticated Binance klines endpoint as data_fetch.py/backtest.py --
+    no need to guess the private API's own "resolved market" schema.
+    Retries because the round's last 1m candle may not exist yet right at
+    the boundary (data-api.binance.vision closes candles with a small lag)."""
+    round_end_ms = round_start_ms + ROUND_SECONDS * 1000
+    for attempt in range(retries):
+        try:
+            resp = requests.get(
+                "https://data-api.binance.vision/api/v3/klines",
+                params={"symbol": "BTCUSDT", "interval": "1m", "startTime": round_start_ms, "limit": 6},
+                timeout=10,
+            )
+            candles = resp.json()
+            by_open_time = {c[0]: c for c in candles} if isinstance(candles, list) else {}
+            start_candle = by_open_time.get(round_start_ms)
+            end_candle = by_open_time.get(round_end_ms)
+            if start_candle and end_candle:
+                start_price = float(start_candle[1])  # open price
+                end_price = float(end_candle[1])  # open price
+                outcome = "Up" if end_price > start_price else ("Down" if end_price < start_price else "Tie")
+                return start_price, end_price, outcome
+        except Exception as exc:
+            print(f"[resolve-error] intento {attempt + 1}/{retries}: {exc}")
+        time.sleep(delay_seconds)
+    return None, None, None
+
+
+def log_round_outcome(market_id, round_start_ms):
+    ensure_outcomes_file()
+    round_end_ms = round_start_ms + ROUND_SECONDS * 1000
+    start_price, end_price, outcome = resolve_round_outcome(round_start_ms)
+    with open(OUTCOMES_FILE, "a", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([market_id, round_start_ms, round_end_ms, start_price, end_price, outcome])
+    if outcome:
+        print(f"[outcome] market_id={market_id} -> {outcome} (${start_price:,.2f} -> ${end_price:,.2f})")
+    else:
+        print(f"[outcome] market_id={market_id} -> no se pudo resolver (klines no disponibles todavia)")
 
 
 def _extract_poll_context(current_round, topic):
@@ -276,22 +361,30 @@ def next_round_boundary(now=None):
 
 def poll_loop(market_id, current_round, topic):
     ensure_log_file()
+    ensure_outcomes_file()
     print(f"\n=== Paso 2: polleando order-book cada {POLL_INTERVAL_SECONDS}s (Ctrl+C para parar) ===")
 
     vendor, condition_id, token_id = _extract_poll_context(current_round, topic)
-    next_refresh_at = next_round_boundary() - REFRESH_MARGIN_SECONDS
+    round_end_at = next_round_boundary()
+    round_start_ms = (round_end_at - ROUND_SECONDS) * 1000
+    next_refresh_at = round_end_at - REFRESH_MARGIN_SECONDS
     last_snapshot_ts = None
     stale_repeats = 0
 
     while True:
         try:
             if time.time() >= next_refresh_at:
-                print("\n[rollover] fin de ronda esperado, buscando la ronda actual de nuevo...")
+                print("\n[rollover] fin de ronda esperado -- resolviendo resultado de la ronda anterior...")
+                log_round_outcome(market_id, round_start_ms)
+
+                print("[rollover] buscando la ronda actual de nuevo...")
                 new_market_id, new_round, new_topic = find_btc_5m_market()
                 if new_market_id is not None:
                     market_id, current_round, topic = new_market_id, new_round, new_topic
                     vendor, condition_id, token_id = _extract_poll_context(current_round, topic)
-                next_refresh_at = next_round_boundary() - REFRESH_MARGIN_SECONDS
+                round_end_at = next_round_boundary()
+                round_start_ms = (round_end_at - ROUND_SECONDS) * 1000
+                next_refresh_at = round_end_at - REFRESH_MARGIN_SECONDS
                 last_snapshot_ts, stale_repeats = None, 0
 
             resp = get_order_book(market_id, vendor, token_id, condition_id)

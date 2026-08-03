@@ -297,16 +297,30 @@ variables de entorno en tu maquina. El script:
    usan estos endpoints). El script imprime la respuesta cruda en cada
    paso -- si algun campo no matchea en tu corrida, queda guardado en
    `data/raw_api_responses.jsonl` para ajustarlo juntos.
-2. Pide el detalle del mercado (`market/detail`) para identificar el
-   token de la opcion "Up".
-3. Pollea `order-book` cada 5 segundos y loguea cada snapshot a
-   `data/live_odds_log.csv` -- **no coloca ninguna orden**.
+2. Pollea `order-book` (con `vendor`, `tokenId` y `conditionId`, los
+   parametros reales que el endpoint exige segun errores `-3026` en vivo)
+   cada 5 segundos y loguea cada snapshot a `data/live_odds_log.csv` --
+   **no coloca ninguna orden**. Cada fila trae, ademas del JSON crudo,
+   columnas ya parseadas (`best_bid`, `best_ask`, `mid_price`) para no
+   tener que reprocesar el texto despues.
+3. Cuando una ronda termina (alineado al limite real de 5 minutos, no a
+   un timer relativo a cuando arranco el script), **resuelve el
+   resultado Up/Down de esa ronda** usando el mismo metodo publico y ya
+   verificado que usa `data_fetch.py`/`backtest.py` -- compara el precio
+   de apertura de la vela de 1m al inicio vs al final de la ronda en
+   `data-api.binance.vision` (no hace falta adivinar el esquema de
+   "mercado resuelto" de la API privada). Guarda el resultado en
+   `data/round_outcomes.csv` (`market_id`, precios de inicio/fin,
+   `outcome`).
+
+Con `live_odds_log.csv` + `round_outcomes.csv` juntos (cruzando por
+`market_id`) se puede finalmente comparar la cuota real del mercado en
+cada momento contra lo que efectivamente paso -- el analisis de
+mispricing real que `option_edge_analysis.py` solo podia aproximar.
 
 Una vez que acumules suficientes horas/dias de datos con eso corriendo,
-comparteme el CSV (o los primeros errores/respuestas crudas si algo no
-matchea) y sigo desde ahi -- primero ajustando el script si hace falta,
-despues haciendo el analisis de mispricing real con cuotas reales en vez
-de la aproximacion Gaussiana de `option_edge_analysis.py`.
+comparteme ambos CSVs (o los primeros errores/respuestas crudas si algo
+no matchea) y sigo desde ahi.
 
 ## Como correrlo vos mismo
 
