@@ -96,27 +96,28 @@ def round_market_id(now_ms=None):
     return market_id, seconds_left_in_round
 
 
-def sign_request(params: dict) -> str:
-    """HMAC-SHA256 sign, params sorted alphabetically and concatenated
-    as a query string, per Binance's documented integration guide."""
-    sorted_items = sorted(params.items())
-    query_string = urllib.parse.urlencode(sorted_items)
-    signature = hmac.new(
-        API_SECRET.encode("utf-8"), query_string.encode("utf-8"), hashlib.sha256
-    ).hexdigest()
-    return signature
-
-
 def build_ws_url(topic: str) -> str:
+    """Build the signed connection URL.
+
+    The signature must be computed over EXACTLY the same string that gets
+    sent on the wire -- sign one ordering and transmit another (e.g. sign a
+    sorted dict but urlencode an insertion-ordered one) and the server's
+    HMAC check will never match, which is what -1022 "Signature for this
+    request is not valid" means. So here we build the query string ONCE,
+    sign that exact string, and append &signature=... to it -- never
+    reconstructed from a dict a second time.
+    """
     params = {
         "random": "".join(random.choices(string.ascii_letters + string.digits, k=16)),
         "topic": topic,
         "timestamp": str(int(time.time() * 1000)),
         "recvWindow": "5000",
     }
-    params["signature"] = sign_request(params)
-    query_string = urllib.parse.urlencode(params)
-    return f"{WS_BASE}?{query_string}"
+    query_string = urllib.parse.urlencode(sorted(params.items()))
+    signature = hmac.new(
+        API_SECRET.encode("utf-8"), query_string.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    return f"{WS_BASE}?{query_string}&signature={signature}"
 
 
 _current_topic = None  # set right before each connection, used only for logging
