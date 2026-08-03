@@ -138,7 +138,7 @@ def run(candles, fee_pct=10.0):
     print(f"Baseline real Up/Down en todo el periodo: {up_pct:.1f}% Up / {100-up_pct:.1f}% Down")
 
     be = breakeven_winrate(fee_pct)
-    print(f"Con una comision asumida de {fee_pct:.0f}%, hace falta un win rate > {be*100:.1f}% para ganar en el largo plazo")
+    print(f"Con una comision asumida de {fee_pct:.2f}%, hace falta un win rate > {be*100:.2f}% para ganar en el largo plazo")
     print()
 
     print("Variance ratio test (estructura del precio en si, sin ninguna regla):")
@@ -198,7 +198,12 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--fee", type=float, default=10.0, help="Comision asumida en %%")
+    parser.add_argument(
+        "--fee",
+        type=float,
+        default=0.4,
+        help="Comision asumida en %% (default 0.4, del ejemplo real en la doc de Agentic Wallet: 0.02 USDT de fee sobre una compra de 5 USDT). No incluye price impact/slippage, que es un costo aparte y depende del tamano de la apuesta.",
+    )
     args = parser.parse_args()
 
     candles = data_fetch.load_cached()

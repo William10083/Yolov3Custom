@@ -157,91 +157,139 @@ encima de 50%:
   intervalo es mas ancho, entre ~50% y ~55%.
 - `micro_mean_reversion_15m`: 51.0% OOS, consistente con el resto.
 
-**Pero incluso asi, nada le gana de forma robusta a una comision del 10%.**
-El punto (no el limite inferior del IC) de `streak_reversion_3` y
-`streak_reversion_4` roza el breakeven de 52.6%, pero el limite inferior
-del intervalo de confianza queda por debajo, asi que no se puede confiar
-en que eso se sostenga. Dicho de otra forma: **el efecto es real pero
-chico** (~1.5-3 puntos porcentuales sobre 50%), y una comision del 10% es
-demasiado grande para ese margen. Si la comision real de tu app fuera mas
-baja -- por ejemplo, `contrarian_last_1` necesitaria una comision menor a
-~5.8% para ser rentable en el largo plazo con el win rate observado --
-ahi si empezaria a ser interesante. Pero no tenemos confirmado cual es la
-comision real de la plataforma (ver Limitaciones).
+**Actualizacion importante: la "comision del 10%" era una suposicion mal
+calibrada.** Encontre la documentacion real de Binance para este producto
+("Agentic Wallet", que integra este mismo mercado de prediccion) con un
+ejemplo concreto de una operacion real: comprar 5 USDT de "Up" cuesta
+**0.02 USDT de fee (~0.4%)**, mas un 1.2% de "price impact" (deslizamiento
+por el tamano de la orden, aparte de la fee, y que crece con el tamano de
+la apuesta y baja liquidez). Con **0.4% de fee** (sin contar price
+impact), el breakeven baja de 52.6% a **50.1%** -- ahi el panorama cambia
+bastante:
 
-## Monitoreo en vivo -- APIs oficiales (no screen-scraping)
+```
+Con una comision asumida de 0.40%, hace falta un win rate > 50.10% para ganar en el largo plazo
 
-En vez de leer la pantalla o simular clicks, la via correcta es una API
-oficial. Confirme que existen dos:
+28 de ~60 estrategias probadas superan ese breakeven de forma
+estadisticamente significativa (limite inferior del IC95% > 50.1%),
+todas de la familia contrarian / mean-reversion:
+  contrarian_last_1:              51.5% OOS  IC95% [50.9%, 52.1%]
+  micro_mean_reversion_5m:        51.5% OOS  IC95% [50.9%, 52.1%]
+  micro_mean_reversion_15m:       51.0% OOS  IC95% [50.4%, 51.6%]
+  volume_imbalance_contrarian_5m: hasta 52.8% OOS segun el umbral
+  streak_reversion_2/3/4:         51.6%-53.2% OOS
+```
 
-- **Binance Wallet Prediction Markets API** (lanzada junio 2026): datos
-  en tiempo real de mercados de prediccion, odds, liquidez, y ejecucion
-  de ordenes. Requiere solicitud via el Binance Developer Platform (no es
-  de acceso libre inmediato).
-- **Predict.fun API** (la infraestructura real detras de este mercado):
-  tiene un endpoint publico de series historicas de precios, ideal para
-  backtesting con las cuotas reales en vez de nuestra aproximacion
-  Gaussiana. Probe el endpoint:
-  - Testnet (`api-testnet.predict.fun`): abierto, sin API key, pero solo
-    tiene mercados de prueba/historicos (ej. BTC Up/Down de 15 min de
-    Dic 2025-Feb 2026), no el mercado de 5 min en vivo que usas.
-  - Mainnet (`api.predict.fun`): devuelve `401 unauthorized` sin API key
-    -- ahi es donde estaria el mercado real, pero hace falta pedir acceso.
+**Pero ojo con dos cosas antes de entusiasmarse:**
 
-**Siguiente paso si se quiere seguir con esto:** conseguir una API key
-(de Binance o de Predict.fun mainnet). Con eso, se puede construir un
-logger que capture cuotas reales + resultado de cada ronda de forma
-continua, y comparar esas cuotas reales contra la probabilidad real
-medida en este backtest -- eso si respondaria con precision si hay
-mispricing explotable, en vez de la aproximacion que hicimos con
-`option_edge_analysis.py`. Sin la key no se puede avanzar mas en este
-punto especifico.
+1. **No son 28 hallazgos independientes.** Son 28 variantes muy
+   parecidas del mismo efecto de fondo (contrarian/mean-reversion) que ya
+   habiamos identificado con el variance-ratio test. Que "28 de 60"
+   crucen el umbral sirve como confirmacion de que el efecto es
+   consistente entre variantes, no como "encontramos 28 estrategias
+   distintas" -- serian, en la practica, la misma apuesta expresada de
+   formas ligeramente distintas.
+2. **El 1.2% de price impact del ejemplo NO esta incluido en este
+   breakeven.** Es un costo real y aparte de la fee, que ademas escala
+   con el tamano de la apuesta y baja si el mercado esta liquido (o sube
+   si esta ilíquido, como en el ejemplo 5%/94% que viste, donde el lado
+   minoritario puede tener poca profundidad). Con precios entre ~51% y
+   ~53% de acierto, el margen sobre el 50.1% de breakeven-por-fee es de
+   apenas 1-3 puntos porcentuales -- un price impact de 1.2% en una sola
+   operacion ya se come buena parte de esa ventaja. Esto es lo que hay
+   que medir con datos reales de order book antes de sacar conclusiones.
 
-### `local_odds_logger.py` -- corre en tu dispositivo, no aca
+Dicho de otra forma: con la fee real conocida, el efecto que encontramos
+**podria** ser explotable, pero falta el dato mas importante -- cuanto
+cuesta realmente ejecutar (price impact real, no el ejemplo generico de
+la doc) -- y eso solo se mide con cuotas/order-book reales en vivo, no
+con nuestra aproximacion de precio historico.
 
-Verifique con la documentacion oficial que el WebSocket de la Binance
-Prediction Markets API vive en `wss://api.binance.com/sapi/wss` -- el
-mismo dominio `api.binance.com` que ya esta bloqueado por geo-restriccion
-desde este sandbox (mismo error 451 que vimos con los datos de precio al
-principio). Ademas requiere autenticacion HMAC-SHA256 firmada con tu API
-key/secret real de Binance (permiso "Prediction Trading" habilitado en tu
-cuenta con fondos) -- no hay endpoint publico de solo lectura para esto.
+## Descubrimiento: "Agentic Wallet" -- el propio bot de Binance para esto
 
-Por ambas razones, este componente **esta escrito para que lo corras vos
-en tu propio dispositivo**, no en este entorno remoto:
+Mientras buscaba la fee real, encontre que Binance tiene un producto
+llamado **Agentic Wallet** cuya documentacion describe, casi literal,
+lo que este proyecto intenta hacer: un asistente conversacional dentro
+de la wallet de Binance al que se le puede pedir en lenguaje natural que
+seguido el precio de BTC, juzgue Up/Down ronda a ronda, apueste dentro de
+limites de exposicion, y aplique take-profit/stop-loss -- con la
+salvedad explicita de que "los datos de precio de BTC deben venir de tu
+propia fuente de datos o un Skill" (o sea, el propio agente de Binance
+NO trae su propio analisis de precio -- exactamente el hueco que este
+backtester intenta llenar). Esto **no es una API externa que yo pueda
+llamar directamente** -- es la propia IA de Binance dentro de su app,
+pensada para que el usuario le hable directamente. Lo dejo documentado
+porque explica de donde salio el dato de la fee real, y porque si en
+algun momento se quiere ir por ese camino en vez de construir todo a
+mano, esa es la puerta oficial.
+
+## Monitoreo en vivo -- endpoints REST reales (no el WebSocket que probamos)
+
+La primera version de `local_odds_logger.py` uso un WebSocket
+(`wallet-events`) que resulto ser para **notificaciones de tus propias
+ordenes** (compra exitosa, orden llena, etc.), no para cuotas de mercado
+-- por eso conectaba bien (`REGISTER` exitoso) pero nunca llegaba nada
+util. Encontre la documentacion real
+(`developers.binance.com/en/docs/products/w3w-prediction/`, accesible
+via su `llms.txt`/`llms-full.txt` -- un indice en texto plano pensado
+para que lo lean agentes como yo, sin necesidad de renderizar JavaScript)
+y confirme que existen dos canales separados:
+
+- `web3_prediction_pm_*` (wallet-events): tus propias ordenes -- el que
+  probamos por error.
+- `web3_prediction_orderbook_{marketId}`: **el canal real de cuotas en
+  vivo**, con `marketId` siendo un ID numerico interno de Binance (no el
+  slug `btc-updown-5m-<timestamp>` de la URL, que era una conjetura
+  incorrecta). Tambien existe `web3_prediction_orderbook_data`, un topic
+  agregado que trae todos los mercados en un solo stream.
+
+Ademas existen endpoints REST de solo lectura, bajo `market-data` (no
+marcados `USER_DATA` como los de posiciones/balance, lo que sugiere un
+nivel de autenticacion mas liviano, aunque no lo pude confirmar en vivo):
+
+```
+GET /sapi/v1/w3w/wallet/prediction/category/list
+GET /sapi/v1/w3w/wallet/prediction/market/list
+GET /sapi/v1/w3w/wallet/prediction/market/search
+GET /sapi/v1/w3w/wallet/prediction/market/detail
+GET /sapi/v1/w3w/wallet/prediction/order-book
+GET /sapi/v1/w3w/wallet/prediction/order-book/last-trade-price
+```
+
+`local_odds_logger.py` fue reescrito para usar **REST en vez del
+WebSocket** -- mas simple de tener bien la primera vez que volver a pelear
+con la firma de otro canal WS. Sigue sin poder confirmarse en vivo desde
+este entorno (mismo bloqueo geografico de `api.binance.com`), asi que el
+script imprime la respuesta cruda de cada llamada para poder ajustar
+nombres de parametros/campos juntos si mi conjetura inicial no pega.
+
+### Como correrlo
 
 ```bash
-pip install websocket-client
+pip install requests
 export BINANCE_API_KEY="tu_api_key"
 export BINANCE_API_SECRET="tu_secret_key"
 python3 local_odds_logger.py
 ```
 
 Nunca pegues la API key o el secret en el chat -- se guardan solo como
-variables de entorno en tu maquina. El script firma las conexiones,
-loguea cada mensaje crudo a `data/live_odds_log.csv`, reconecta con
-backoff si se cae, y **no coloca ninguna orden** (es de solo lectura).
+variables de entorno en tu maquina. El script:
 
-**Sobre el topic:** un link compartido de `web3.binance.com` que pasaste
-confirmo que cada ronda de 5 min es su propio mercado, identificado como
-`btc-updown-5m-<timestamp_unix>`, donde el timestamp cae justo en un
-limite de 5 minutos (el ejemplo `...-1785738000` = 2026-08-03 06:20:00
-UTC exacto). El script ahora **calcula ese id solo**, por ronda, en vez
-de necesitar un valor fijo pegado a mano (funcion `round_market_id()`).
-No pude confirmar el formato exacto capturando el frame real de
-suscripcion -- la pagina esta detras de un desafio anti-bot de AWS WAF
-que no pude pasar desde aca -- asi que es la mejor conjetura educada, no
-un dato verificado. El primer minuto corriendo el script te va a decir si
-acerto: si solo ves trafico de PING/conexion y ningun dato de precio,
-proba cambiar `MARKET_ID_USES_END_TIME = False` en el archivo (por si el
-id usa el inicio de la ronda en vez del final), o consegui el topic real
-inspeccionando la app/web con una PC y pasalo con
-`export TOPIC_OVERRIDE="el_topic_real"` para saltarte el calculo.
+1. Busca el mercado "BTC Up or Down 5m" (`market/search`, con fallback a
+   `market/list`), imprimiendo la respuesta cruda -- si mis nombres de
+   campo/parametro adivinados no matchean, vas a ver el JSON real ahi
+   mismo (y queda guardado en `data/raw_api_responses.jsonl`) para que
+   me lo pases y lo corrija.
+2. Pide el detalle del mercado (`market/detail`) para identificar el
+   token de la opcion "Up".
+3. Pollea `order-book` cada 5 segundos y loguea cada snapshot a
+   `data/live_odds_log.csv` -- **no coloca ninguna orden**.
 
 Una vez que acumules suficientes horas/dias de datos con eso corriendo,
-comparteme el CSV y hago el analisis de mispricing real (reemplazando la
-aproximacion Gaussiana de `option_edge_analysis.py` por datos de cuotas
-reales).
+comparteme el CSV (o los primeros errores/respuestas crudas si algo no
+matchea) y sigo desde ahi -- primero ajustando el script si hace falta,
+despues haciendo el analisis de mispricing real con cuotas reales en vez
+de la aproximacion Gaussiana de `option_edge_analysis.py`.
 
 ## Como correrlo vos mismo
 
@@ -249,7 +297,7 @@ reales).
 cd btc_prediction_backtester
 pip install -r requirements.txt
 python3 data_fetch.py --days 180      # descarga y cachea datos reales (no hay datos en git)
-python3 backtest.py --fee 10          # corre el backtest completo
+python3 backtest.py --fee 0.4         # corre el backtest completo (0.4% = fee real segun doc de Agentic Wallet)
 python3 option_edge_analysis.py       # calibracion del "precio justo" vs resultados reales
 python3 manual_sequence_analysis.py   # analiza tu lista de 36 resultados
 ```
@@ -259,16 +307,18 @@ python3 manual_sequence_analysis.py   # analiza tu lista de 36 resultados
 - El %/% que se ve en la app **no es un pool de apuestas simple, es el
   precio de un mercado CLOB tipo opcion binaria** (ver seccion "Que
   mercado es realmente esto"). No hay forma de reconstruir ese precio
-  historico sin una API key de Predict.fun/Binance, asi que no esta
-  modelado con datos reales aqui -- `option_edge_analysis.py` lo
-  aproxima con un modelo Gaussiano calibrado con volatilidad historica,
-  que es una aproximacion razonable pero no el dato real.
-- El termino "comision del 10%" que se uso en corridas anteriores era una
-  suposicion mia a partir de un texto ambiguo en la UI ("Automatico |
-  10%") -- no esta confirmado que sea una fee. Con un mercado tipo CLOB,
-  el costo real esta en el spread del libro de ordenes, no en una
-  comision fija. El parametro `--fee` de `backtest.py` sigue siendo util
-  como referencia/limite superior, pero no es un dato verificado.
+  historico sin una API key real, asi que no esta modelado con datos
+  reales aqui -- `option_edge_analysis.py` lo aproxima con un modelo
+  Gaussiano calibrado con volatilidad historica, que es una aproximacion
+  razonable pero no el dato real.
+- **La fee de 0.4% viene de UN ejemplo ilustrativo** en la documentacion
+  de Agentic Wallet (5 USDT -> 0.02 USDT de fee), no de una tabla de fees
+  confirmada y exhaustiva -- podria variar por mercado o tamano de orden.
+  Y no incluye el **price impact** (1.2% en ese mismo ejemplo), que es un
+  costo real, separado, y que escala con el tamano de la apuesta y la
+  liquidez del momento -- no esta incluido en el `--fee` de `backtest.py`.
+  El breakeven de 50.1% que reporta el backtest es, por lo tanto, un
+  piso optimista, no el costo total real de operar.
 - **Fuente de precio:** se uso el precio de ultima operacion de Binance
   (`data-api.binance.vision`), no el mid-price de Chainlink Data Streams
   que realmente resuelve el mercado (ese requiere API key paga). En
@@ -285,34 +335,40 @@ python3 manual_sequence_analysis.py   # analiza tu lista de 36 resultados
 
 ## Conclusion honesta
 
-Con 180 dias de datos reales (52k rondas): **si hay una senal real, chica
-y consistente.** El variance-ratio test (independiente de cualquier regla
+Con 180 dias de datos reales (52k rondas): **hay una senal real, chica y
+consistente.** El variance-ratio test (independiente de cualquier regla
 inventada) confirma mean-reversion estadisticamente significativo en los
 retornos de BTC a 5 min, y las estrategias contrarian/streak-reversion lo
-capturan en la practica: ~51-52% de acierto out-of-sample, de forma
+capturan en la practica: ~51-53% de acierto out-of-sample, de forma
 consistente entre corridas y con intervalos de confianza que no incluyen
 50% en los casos con mas muestra. Es un hallazgo genuino, consistente con
 microestructura de mercado (bid-ask bounce).
 
-Dos cosas nuevas de esta ronda cambian el diagnostico:
+Lo que cambio en esta ronda:
 
-1. Este no es un juego de comision fija -- es un mercado de opciones
-   binarias tipo Polymarket, con creadores de mercado profesionales del
-   otro lado. Verificamos con `option_edge_analysis.py` que un modelo
-   naive (random walk puro) esta razonablemente bien calibrado contra
-   los resultados reales, y que el momentum de ultimo minuto no aporta
-   señal extra una vez que se conoce el gap actual -- es decir, **si
-   los market makers usan un modelo similar al naive, no dejan un hueco
-   obvio ahi**. No podemos confirmar si el pricing real del mercado
-   coincide con este modelo naive sin datos reales de cuotas.
-2. Existen APIs oficiales (Binance Wallet Prediction Markets API,
-   Predict.fun) para obtener esas cuotas reales -- pero ambas requieren
-   solicitar una API key, algo que queda del lado del usuario.
+1. **La fee real (~0.4%, de un ejemplo concreto en la doc de Agentic
+   Wallet) es mucho mas chica que el 10% que se habia asumido antes** por
+   un texto ambiguo de la UI. Con el breakeven correcto (50.1% en vez de
+   52.6%), la mayoria de las variantes contrarian/mean-reversion lo
+   superan de forma estadisticamente significativa.
+2. **Pero eso no incluye price impact** (1.2% en ese mismo ejemplo,
+   costo real y aparte, que crece con el tamano de la apuesta) -- con un
+   margen de apenas 1-3 puntos porcentuales sobre breakeven-por-fee, el
+   price impact real podria facilmente borrar la ventaja. Esto es lo
+   unico que falta medir con datos reales, no con una fee generica de un
+   ejemplo de documentacion.
+3. Encontramos los endpoints REST y WebSocket reales para leer cuotas en
+   vivo (`order-book`, topic `web3_prediction_orderbook_{marketId}`) --
+   el canal que se probo primero (`wallet-events`) resulto ser solo
+   notificaciones de ordenes propias, no cuotas de mercado. Con eso,
+   `local_odds_logger.py` ahora apunta al lugar correcto.
 
-**Siguiente paso real, en orden:** (1) decidir si vale la pena pedir
-acceso a alguna de esas APIs; (2) si se consigue, loguear cuotas reales
-vs resultado por un tiempo; (3) recien ahi comparar cuotas reales contra
-la probabilidad real medida aca. Hasta entonces, el edge medido (~51-52%)
-es interesante pero insuficiente para justificar apostar dinero real de
-forma automatizada -- y sigue sin haber automatizacion de clicks ni
-ordenes en este proyecto.
+**Siguiente paso real, en orden:** (1) correr `local_odds_logger.py` en
+tu dispositivo con una API key nueva (nunca la anterior expuesta en el
+chat) para loguear cuotas + resultado reales por un tiempo; (2) con eso,
+medir el price impact real en la practica, no el del ejemplo generico de
+la doc; (3) recien ahi comparar el costo total real contra el ~51-53% de
+acierto medido aca para saber si de verdad sobra margen. Hasta entonces,
+el edge medido es prometedor pero **no confirmado como rentable neto de
+todos los costos reales** -- y sigue sin haber automatizacion de clicks
+ni ordenes en este proyecto.

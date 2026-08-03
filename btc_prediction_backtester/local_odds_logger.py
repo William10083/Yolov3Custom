@@ -1,61 +1,64 @@
-"""Live odds/outcome logger for Binance's Prediction Markets WebSocket API.
+"""Live odds logger for Binance's Prediction Markets REST API.
 
 RUN THIS ON YOUR OWN DEVICE, NOT IN A REMOTE SANDBOX.
-Binance's authenticated API (api.binance.com, including this websocket)
-is geo-blocked from some cloud/sandbox IP ranges. It must run from your
-own network, with your own credentials, which never leave your device.
+Binance's authenticated API (api.binance.com) is geo-blocked from some
+cloud/sandbox IP ranges. It must run from your own network, with your own
+credentials, which never leave your device.
 
 Setup (on your own machine):
-    pip install websocket-client
+    pip install requests
     export BINANCE_API_KEY="..."
     export BINANCE_API_SECRET="..."
     python3 local_odds_logger.py
 
-What this does:
-  - Opens a signed websocket connection per Binance's documented
-    integration guide (HMAC-SHA256 signed query params, X-MBX-APIKEY
-    header, 30s PING heartbeat, reconnect with backoff).
-  - Subscribes to the prediction-market topic you configure below.
-  - Logs every message to a local CSV (timestamp + raw JSON), so nothing
-    is lost even if we don't know the exact field layout yet.
-  - Does NOT place any orders. Read-only logging only.
+WHY REST INSTEAD OF THE WEBSOCKET THIS TIME:
+The real docs (developers.binance.com/en/docs/products/w3w-prediction/...)
+turned out to describe TWO different websocket channels:
+  - wallet-events: push notifications about YOUR OWN orders (buy/sell
+    success, fills, claims...) -- NOT market odds. This is what an earlier
+    version of this script was accidentally pointed at (REGISTER
+    succeeded, but nothing else ever arrived -- because no order events
+    were happening).
+  - orderbook: the real live-odds channel, topic format
+    `web3_prediction_orderbook_{marketId}` where marketId is Binance's
+    internal NUMERIC id -- not the "btc-updown-5m-<timestamp>" slug from
+    the share URL, which was a wrong guess.
+REST is simpler to get right than re-debugging that websocket's auth, and
+polling every few seconds is more than enough for our purposes (the
+backtest itself only ever used 1-minute granularity). This script:
+  1. Finds the current live "BTC Up or Down 5m" market via the market-data
+     REST endpoints (search/list) -- prints the RAW response at every step
+     so if my guessed field names are wrong, you can see the real ones and
+     tell me.
+  2. Polls the order-book endpoint for that market's outcome tokens on an
+     interval, logging price (implied probability) + timestamp to CSV.
+  3. Places NO orders. Read-only.
 
-IMPORTANT -- about the topic name: a shared "btc-updown-5m-<timestamp>"
-web3.binance.com URL confirmed each 5-minute round is its own market,
-identified by a unix-second timestamp that lands exactly on a 5-minute
-boundary (e.g. ...-1785738000 = 2026-08-03 06:20:00 UTC). So the topic
-isn't a single fixed string -- it changes every round. This script
-computes it automatically each round (see `round_market_id()` below) and
-reconnects with the new topic as each round rolls over.
-
-This is still an EDUCATED GUESS at the exact topic format
-(f"btc-updown-5m-{boundary_ts}"), not a confirmed value -- I could not
-capture the real websocket subscribe frame (the page is behind an AWS WAF
-bot challenge I can't pass from here). First run will tell you fast
-whether it's right:
-  - If you start getting TOPIC messages with price/odds data -> correct.
-  - If you only get PING/connection-ack traffic and nothing else -> wrong
-    format. Try MARKET_ID_USES_END_TIME = False (round START instead of
-    END), or capture the real value yourself (see README) and hardcode it
-    via the TOPIC_OVERRIDE env var.
+IMPORTANT CAVEATS (I could not verify these live -- api.binance.com is
+geo-blocked from where I run):
+  - Exact query parameter names for search/list/detail/order-book are
+    educated guesses from the endpoint descriptions, not a captured
+    working example. The script tries a couple of variants and prints
+    raw responses so you can tell me what actually works.
+  - Whether these market-data endpoints need HMAC signing at all is
+    unconfirmed (they're not tagged USER_DATA in the docs, which on
+    Binance often -- not always -- means a lighter/no auth tier). The
+    script signs everything by default since that's always accepted when
+    a normal API key is used; flip SIGN_MARKET_DATA_CALLS=False to try
+    unsigned if you get a signature-related error on these specific calls.
 """
 import csv
 import hashlib
 import hmac
 import json
 import os
-import random
-import string
-import threading
 import time
 import urllib.parse
 
 try:
-    import websocket  # pip install websocket-client
+    import requests
 except ImportError:
-    raise SystemExit(
-        "Falta la libreria websocket-client. Instala con: pip install websocket-client"
-    )
+    raise SystemExit("Falta la libreria requests. Instala con: pip install requests")
 
 API_KEY = os.environ.get("BINANCE_API_KEY")
 API_SECRET = os.environ.get("BINANCE_API_SECRET")
@@ -67,60 +70,140 @@ if not API_KEY or not API_SECRET:
         "antes de este script. Nunca las escribas directamente en el codigo."
     )
 
-WS_BASE = "wss://api.binance.com/sapi/wss"
-ROUND_SECONDS = 5 * 60
-
-# Educated guess: does the market id use the round's END boundary (like the
-# 1785738000 = 06:20:00 example) or its START? Flip this if the first guess
-# doesn't return real data.
-MARKET_ID_USES_END_TIME = True
-
-# Escape hatch: if you captured the real topic yourself (see README), set
-#   export TOPIC_OVERRIDE="the_real_topic_string"
-# and this script will use that fixed value instead of guessing per round.
-TOPIC_OVERRIDE = os.environ.get("TOPIC_OVERRIDE")
+REST_BASE = "https://api.binance.com"
+SIGN_MARKET_DATA_CALLS = True  # flip to False if these specific calls reject the signature
+POLL_INTERVAL_SECONDS = 5
 
 LOG_FILE = os.path.join(os.path.dirname(__file__), "data", "live_odds_log.csv")
+DEBUG_LOG_FILE = os.path.join(os.path.dirname(__file__), "data", "raw_api_responses.jsonl")
 
 
-def round_market_id(now_ms=None):
-    """Compute the market id ('btc-updown-5m-<ts>') for the round currently
-    in progress, and how many seconds until that round ends."""
-    now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
-    now_s = now_ms // 1000
-    round_start = (now_s // ROUND_SECONDS) * ROUND_SECONDS
-    round_end = round_start + ROUND_SECONDS
-    boundary_ts = round_end if MARKET_ID_USES_END_TIME else round_start
-    market_id = f"btc-updown-5m-{boundary_ts}"
-    seconds_left_in_round = round_end - now_s
-    return market_id, seconds_left_in_round
-
-
-def build_ws_url(topic: str) -> str:
-    """Build the signed connection URL.
-
-    The signature must be computed over EXACTLY the same string that gets
-    sent on the wire -- sign one ordering and transmit another (e.g. sign a
-    sorted dict but urlencode an insertion-ordered one) and the server's
-    HMAC check will never match, which is what -1022 "Signature for this
-    request is not valid" means. So here we build the query string ONCE,
-    sign that exact string, and append &signature=... to it -- never
-    reconstructed from a dict a second time.
-    """
-    params = {
-        "random": "".join(random.choices(string.ascii_letters + string.digits, k=16)),
-        "topic": topic,
-        "timestamp": str(int(time.time() * 1000)),
-        "recvWindow": "5000",
-    }
+def _sign(params: dict) -> str:
     query_string = urllib.parse.urlencode(sorted(params.items()))
-    signature = hmac.new(
+    return hmac.new(
         API_SECRET.encode("utf-8"), query_string.encode("utf-8"), hashlib.sha256
     ).hexdigest()
-    return f"{WS_BASE}?{query_string}&signature={signature}"
 
 
-_current_topic = None  # set right before each connection, used only for logging
+def api_get(path: str, params: dict = None, signed: bool = None):
+    """GET against the Binance REST API. Logs the raw response for debugging
+    regardless of success/failure -- we're reverse-engineering the exact
+    param/response shape live, so keep everything."""
+    params = dict(params or {})
+    if signed is None:
+        signed = SIGN_MARKET_DATA_CALLS
+    if signed:
+        params["timestamp"] = str(int(time.time() * 1000))
+        params["recvWindow"] = "5000"
+        query_string = urllib.parse.urlencode(sorted(params.items()))
+        signature = _sign(params)
+        url = f"{REST_BASE}{path}?{query_string}&signature={signature}"
+    else:
+        query_string = urllib.parse.urlencode(params)
+        url = f"{REST_BASE}{path}" + (f"?{query_string}" if query_string else "")
+
+    headers = {"X-MBX-APIKEY": API_KEY}
+    resp = requests.get(url, headers=headers, timeout=10)
+
+    os.makedirs(os.path.dirname(DEBUG_LOG_FILE), exist_ok=True)
+    with open(DEBUG_LOG_FILE, "a") as f:
+        f.write(
+            json.dumps(
+                {
+                    "at_ms": int(time.time() * 1000),
+                    "path": path,
+                    "params": {k: v for k, v in params.items() if k not in ("timestamp", "recvWindow")},
+                    "status": resp.status_code,
+                    "body": resp.text[:4000],
+                }
+            )
+            + "\n"
+        )
+
+    print(f"[api] GET {path} -> {resp.status_code}")
+    if resp.status_code != 200:
+        print(f"       {resp.text[:500]}")
+    return resp
+
+
+def _first_present(d: dict, candidates):
+    for c in candidates:
+        if isinstance(d, dict) and c in d:
+            return d[c]
+    return None
+
+
+def find_btc_5m_market():
+    """Try to locate the live 'BTC Up or Down 5m' market and return its
+    market id (raw dict too, for inspection). Tries market/search first,
+    falls back to market/list + manual filtering. Field names are educated
+    guesses -- prints raw JSON at every step so you can correct me."""
+    print("\n=== Paso 1: buscando el mercado 'BTC Up or Down 5m' ===")
+
+    for keyword_param in ("keyword", "query", "q", "search"):
+        resp = api_get(
+            "/sapi/v1/w3w/wallet/prediction/market/search",
+            {keyword_param: "BTC Up or Down 5m"},
+        )
+        if resp.status_code == 200:
+            break
+    else:
+        print("market/search no respondio 200 con ningun nombre de parametro probado.")
+        resp = None
+
+    candidates = []
+    if resp is not None and resp.status_code == 200:
+        try:
+            data = resp.json()
+        except ValueError:
+            data = None
+        print("Respuesta cruda de market/search:", json.dumps(data, indent=2)[:2000] if data else resp.text[:500])
+        items = _first_present(data, ("data", "items", "markets", "list", "result")) if isinstance(data, dict) else data
+        if isinstance(items, list):
+            candidates.extend(items)
+
+    if not candidates:
+        print("\nProbando market/list como alternativa...")
+        resp2 = api_get("/sapi/v1/w3w/wallet/prediction/market/list", {"limit": 50})
+        if resp2.status_code == 200:
+            try:
+                data2 = resp2.json()
+            except ValueError:
+                data2 = None
+            print("Respuesta cruda de market/list:", json.dumps(data2, indent=2)[:2000] if data2 else resp2.text[:500])
+            items2 = _first_present(data2, ("data", "items", "markets", "list", "result")) if isinstance(data2, dict) else data2
+            if isinstance(items2, list):
+                candidates.extend(items2)
+
+    match = None
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        title = str(_first_present(item, ("title", "name", "topic", "question")) or "")
+        if "btc" in title.lower() and "5" in title:
+            match = item
+            break
+
+    if not match:
+        print(
+            "\nNo pude identificar automaticamente el mercado en la respuesta. "
+            "Mira el JSON crudo de arriba (y en data/raw_api_responses.jsonl) y "
+            "decime cual es el campo con el id del mercado 'BTC Up or Down 5m' -- "
+            "lo agrego al codigo."
+        )
+        return None, None
+
+    market_id = _first_present(match, ("id", "marketId", "topicId", "marketID"))
+    print(f"\nMercado encontrado: {match}")
+    print(f"market_id extraido: {market_id}")
+    return market_id, match
+
+
+def get_order_book(market_id, outcome_token_id=None):
+    params = {"marketId": market_id}
+    if outcome_token_id:
+        params["outcomeTokenId"] = outcome_token_id
+    return api_get("/sapi/v1/w3w/wallet/prediction/order-book", params)
 
 
 def ensure_log_file():
@@ -128,93 +211,55 @@ def ensure_log_file():
     if not os.path.exists(LOG_FILE):
         with open(LOG_FILE, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["received_at_ms", "topic", "raw_message"])
+            writer.writerow(["polled_at_ms", "market_id", "http_status", "raw_body"])
 
 
-def log_message(raw_message: str):
+def log_snapshot(market_id, resp):
     with open(LOG_FILE, "a", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow([int(time.time() * 1000), _current_topic, raw_message])
+        writer.writerow([int(time.time() * 1000), market_id, resp.status_code, resp.text[:2000]])
 
 
-def on_message(ws, message):
-    print(f"[msg] {message[:200]}")
-    log_message(message)
-    try:
-        envelope = json.loads(message)
-        if envelope.get("type") == "TOPIC" and isinstance(envelope.get("data"), str):
-            # data field is double-encoded JSON per the integration guide
-            inner = json.loads(envelope["data"])
-            print(f"  -> parsed: {inner}")
-    except (json.JSONDecodeError, AttributeError):
-        pass
-
-
-def on_error(ws, error):
-    print(f"[error] {error}")
-
-
-def on_close(ws, close_status_code, close_msg):
-    print(f"[closed] code={close_status_code} msg={close_msg}")
-
-
-def on_open(ws):
-    print("[open] conectado, iniciando heartbeat")
-
-
-def run_forever_with_backoff():
+def poll_loop(market_id, market_detail):
     ensure_log_file()
-    backoff = 2
+    print(f"\n=== Paso 2: polleando order-book cada {POLL_INTERVAL_SECONDS}s (Ctrl+C para parar) ===")
+    outcome_token_id = None
+    outcomes = _first_present(market_detail, ("outcomes", "tokens")) if market_detail else None
+    if isinstance(outcomes, list):
+        for o in outcomes:
+            name = str(_first_present(o, ("name", "outcomeName", "title")) or "").lower()
+            if name in ("up", "yes"):
+                outcome_token_id = _first_present(o, ("tokenId", "outcomeTokenId", "id"))
+                break
+
     while True:
-        if TOPIC_OVERRIDE:
-            topic = TOPIC_OVERRIDE
-            seconds_left = ROUND_SECONDS  # fixed topic: no need to rotate
-        else:
-            topic, seconds_left = round_market_id()
-        print(f"[topic] usando '{topic}' (quedan ~{seconds_left}s de esta ronda)")
-
-        global _current_topic
-        _current_topic = topic
-
         try:
-            url = build_ws_url(topic)
-            ws = websocket.WebSocketApp(
-                url,
-                header=[f"X-MBX-APIKEY: {API_KEY}"],
-                on_message=on_message,
-                on_error=on_error,
-                on_close=on_close,
-                on_open=on_open,
-            )
-
-            # Close this connection right as the round ends so the outer
-            # loop can recompute the next round's topic and resubscribe.
-            rotate_timer = None
-            if not TOPIC_OVERRIDE:
-                rotate_timer = threading.Timer(max(seconds_left, 1) + 1, ws.close)
-                rotate_timer.daemon = True
-                rotate_timer.start()
-
-            ws.run_forever(ping_interval=30, ping_payload="")
-            if rotate_timer:
-                rotate_timer.cancel()
-            backoff = 2  # reset after a clean run
+            resp = get_order_book(market_id, outcome_token_id)
+            log_snapshot(market_id, resp)
+            if resp.status_code == 200:
+                print(f"[snapshot] {resp.text[:200]}")
         except KeyboardInterrupt:
             print("Detenido por el usuario.")
             return
         except Exception as exc:
-            print(f"[fatal] {exc}, reintentando en {backoff}s")
-            time.sleep(backoff)
-            backoff = min(backoff * 2, 60)
+            print(f"[error] {exc}")
+        time.sleep(POLL_INTERVAL_SECONDS)
 
 
 if __name__ == "__main__":
-    if not TOPIC_OVERRIDE:
+    market_id, market_detail = find_btc_5m_market()
+    if market_id is None:
         print(
-            "AVISO: usando un topic ADIVINADO ('btc-updown-5m-<timestamp>'), "
-            "no confirmado -- ver el docstring de este archivo. Si despues de "
-            "un par de minutos solo ves PING/ack y ningun dato de precio/odds, "
-            "el formato esta mal: proba MARKET_ID_USES_END_TIME=False o "
-            "consigue el topic real y usa la variable TOPIC_OVERRIDE."
+            "\nNo se pudo continuar automaticamente. Revisa data/raw_api_responses.jsonl, "
+            "compartime lo que encontraste, y ajusto la extraccion de campos."
         )
-    run_forever_with_backoff()
+    else:
+        detail_resp = api_get("/sapi/v1/w3w/wallet/prediction/market/detail", {"marketId": market_id})
+        detail_json = None
+        if detail_resp.status_code == 200:
+            try:
+                detail_json = detail_resp.json()
+                print("Detalle del mercado:", json.dumps(detail_json, indent=2)[:2000])
+            except ValueError:
+                pass
+        poll_loop(market_id, detail_json)
