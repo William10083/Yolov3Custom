@@ -157,51 +157,61 @@ encima de 50%:
   intervalo es mas ancho, entre ~50% y ~55%.
 - `micro_mean_reversion_15m`: 51.0% OOS, consistente con el resto.
 
-**Actualizacion importante: la "comision del 10%" era una suposicion mal
-calibrada.** Encontre la documentacion real de Binance para este producto
-("Agentic Wallet", que integra este mismo mercado de prediccion) con un
-ejemplo concreto de una operacion real: comprar 5 USDT de "Up" cuesta
-**0.02 USDT de fee (~0.4%)**, mas un 1.2% de "price impact" (deslizamiento
-por el tamano de la orden, aparte de la fee, y que crece con el tamano de
-la apuesta y baja liquidez). Con **0.4% de fee** (sin contar price
-impact), el breakeven baja de 52.6% a **50.1%** -- ahi el panorama cambia
-bastante:
+**Actualizacion importante -- fee real confirmada EN VIVO (no un ejemplo
+generico de documentacion).** Corriendo `local_odds_logger.py` contra el
+endpoint real `market/list`, la respuesta trae, para el topic "BTC Up or
+Down 5m" en si:
+
+```json
+{"feeRateBps": 200, "slippageBps": 1000}
+```
+
+Eso es **fee real = 2.00%** (200 basis points), y **10.00% de tolerancia
+maxima de slippage** (1000 bps) -- este ultimo numero coincide con el
+"Automatico | 10%" que se veia en la UI desde la primera captura al
+principio de todo esto; con esto casi seguro **no era una comision como
+asumi originalmente, era el limite de slippage configurado**. La primera
+suposicion (10% de fee) estaba mal, y la segunda (0.4%, de un ejemplo
+generico en la doc de Agentic Wallet) tambien estaba mal -- esta es la
+buena, porque sale del propio mercado, no de un ejemplo ilustrativo.
+
+Con **2% de fee real**, el breakeven es **50.51%**:
 
 ```
-Con una comision asumida de 0.40%, hace falta un win rate > 50.10% para ganar en el largo plazo
+Con una comision asumida de 2.00%, hace falta un win rate > 50.51% para ganar en el largo plazo
 
-28 de ~60 estrategias probadas superan ese breakeven de forma
-estadisticamente significativa (limite inferior del IC95% > 50.1%),
-todas de la familia contrarian / mean-reversion:
-  contrarian_last_1:              51.5% OOS  IC95% [50.9%, 52.1%]
-  micro_mean_reversion_5m:        51.5% OOS  IC95% [50.9%, 52.1%]
-  micro_mean_reversion_15m:       51.0% OOS  IC95% [50.4%, 51.6%]
-  volume_imbalance_contrarian_5m: hasta 52.8% OOS segun el umbral
-  streak_reversion_2/3/4:         51.6%-53.2% OOS
+23 de ~60 estrategias probadas superan ese breakeven de forma
+estadisticamente significativa (limite inferior del IC95% > 50.51%):
+  contrarian_last_1:          51.5% OOS  IC95% [50.9%, 52.1%]
+  streak_reversion_2:         51.6% OOS  IC95% [50.7%, 52.5%]
+  streak_reversion_3:         52.3% OOS  IC95% [51.1%, 53.6%]
+  micro_mean_reversion_5m:    51.5% OOS  IC95% [50.9%, 52.1%]
+  volume_imbalance_contrarian: varias variantes tambien cruzan
 ```
 
 **Pero ojo con dos cosas antes de entusiasmarse:**
 
-1. **No son 28 hallazgos independientes.** Son 28 variantes muy
-   parecidas del mismo efecto de fondo (contrarian/mean-reversion) que ya
-   habiamos identificado con el variance-ratio test. Que "28 de 60"
-   crucen el umbral sirve como confirmacion de que el efecto es
-   consistente entre variantes, no como "encontramos 28 estrategias
-   distintas" -- serian, en la practica, la misma apuesta expresada de
-   formas ligeramente distintas.
-2. **El 1.2% de price impact del ejemplo NO esta incluido en este
-   breakeven.** Es un costo real y aparte de la fee, que ademas escala
-   con el tamano de la apuesta y baja si el mercado esta liquido (o sube
-   si esta ilíquido, como en el ejemplo 5%/94% que viste, donde el lado
-   minoritario puede tener poca profundidad). Con precios entre ~51% y
-   ~53% de acierto, el margen sobre el 50.1% de breakeven-por-fee es de
-   apenas 1-3 puntos porcentuales -- un price impact de 1.2% en una sola
-   operacion ya se come buena parte de esa ventaja. Esto es lo que hay
-   que medir con datos reales de order book antes de sacar conclusiones.
+1. **No son 23 hallazgos independientes.** Son variantes muy parecidas
+   del mismo efecto de fondo (contrarian/mean-reversion) que ya habiamos
+   identificado con el variance-ratio test. Que crucen el umbral sirve
+   como confirmacion de que el efecto es consistente entre variantes, no
+   como "encontramos 23 estrategias distintas" -- serian, en la
+   practica, la misma apuesta expresada de formas ligeramente distintas.
+2. **El slippage/price-impact real de ejecutar la orden sigue sin estar
+   medido.** El `slippageBps: 1000` es la tolerancia MAXIMA configurada
+   (lo que el sistema permite antes de rechazar la orden), no el costo
+   promedio real de ejecutar -- eso depende de cuanta liquidez haya en
+   el order book en ese momento. Con precios entre ~51% y ~53% de
+   acierto, el margen sobre el 50.51% de breakeven-por-fee es de apenas
+   0.5-3 puntos porcentuales -- un price impact real de solo 1-2% en una
+   operacion ya se come buena parte de esa ventaja. Esto es lo que falta
+   medir con datos reales de order book, no con un limite maximo
+   configurado.
 
-Dicho de otra forma: con la fee real conocida, el efecto que encontramos
-**podria** ser explotable, pero falta el dato mas importante -- cuanto
-cuesta realmente ejecutar (price impact real, no el ejemplo generico de
+Dicho de otra forma: con la fee real confirmada, el efecto que
+encontramos **podria** ser explotable, pero falta el dato mas
+importante -- cuanto cuesta realmente ejecutar (price impact real,
+medido con el order book en vivo, no un limite maximo configurado ni
 la doc) -- y eso solo se mide con cuotas/order-book reales en vivo, no
 con nuestra aproximacion de precio historico.
 
@@ -219,9 +229,10 @@ NO trae su propio analisis de precio -- exactamente el hueco que este
 backtester intenta llenar). Esto **no es una API externa que yo pueda
 llamar directamente** -- es la propia IA de Binance dentro de su app,
 pensada para que el usuario le hable directamente. Lo dejo documentado
-porque explica de donde salio el dato de la fee real, y porque si en
-algun momento se quiere ir por ese camino en vez de construir todo a
-mano, esa es la puerta oficial.
+porque fue el hilo que me llevo a buscar la fee real (encontrada despues
+en vivo via `market/list`, no en esta doc), y porque si en algun momento
+se quiere ir por ese camino en vez de construir todo a mano, esa es la
+puerta oficial.
 
 ## Monitoreo en vivo -- endpoints REST reales (no el WebSocket que probamos)
 
@@ -275,11 +286,17 @@ python3 local_odds_logger.py
 Nunca pegues la API key o el secret en el chat -- se guardan solo como
 variables de entorno en tu maquina. El script:
 
-1. Busca el mercado "BTC Up or Down 5m" (`market/search`, con fallback a
-   `market/list`), imprimiendo la respuesta cruda -- si mis nombres de
-   campo/parametro adivinados no matchean, vas a ver el JSON real ahi
-   mismo (y queda guardado en `data/raw_api_responses.jsonl`) para que
-   me lo pases y lo corrija.
+1. Busca el mercado "BTC Up or Down 5m" via `market/list` (`market/search`
+   devuelve `-1022 signature invalid` con cualquier nombre de parametro
+   que probe, asi que el script ya no lo usa -- `market/list` funciona
+   bien y trae todo lo necesario). La respuesta real, confirmada en vivo,
+   tiene esta forma: un array `marketTopics`, cada uno con `feeRateBps`,
+   `slippageBps`, y una lista anidada `markets` donde cada ronda actual
+   trae su `marketId` numerico (el dato que hacia falta -- el slug
+   `btc-updown-5m-<timestamp>` de la URL compartida NO es el mismo id que
+   usan estos endpoints). El script imprime la respuesta cruda en cada
+   paso -- si algun campo no matchea en tu corrida, queda guardado en
+   `data/raw_api_responses.jsonl` para ajustarlo juntos.
 2. Pide el detalle del mercado (`market/detail`) para identificar el
    token de la opcion "Up".
 3. Pollea `order-book` cada 5 segundos y loguea cada snapshot a
@@ -297,7 +314,7 @@ de la aproximacion Gaussiana de `option_edge_analysis.py`.
 cd btc_prediction_backtester
 pip install -r requirements.txt
 python3 data_fetch.py --days 180      # descarga y cachea datos reales (no hay datos en git)
-python3 backtest.py --fee 0.4         # corre el backtest completo (0.4% = fee real segun doc de Agentic Wallet)
+python3 backtest.py --fee 2.0         # corre el backtest completo (2.0% = feeRateBps=200, confirmado en vivo)
 python3 option_edge_analysis.py       # calibracion del "precio justo" vs resultados reales
 python3 manual_sequence_analysis.py   # analiza tu lista de 36 resultados
 ```
@@ -311,14 +328,14 @@ python3 manual_sequence_analysis.py   # analiza tu lista de 36 resultados
   reales aqui -- `option_edge_analysis.py` lo aproxima con un modelo
   Gaussiano calibrado con volatilidad historica, que es una aproximacion
   razonable pero no el dato real.
-- **La fee de 0.4% viene de UN ejemplo ilustrativo** en la documentacion
-  de Agentic Wallet (5 USDT -> 0.02 USDT de fee), no de una tabla de fees
-  confirmada y exhaustiva -- podria variar por mercado o tamano de orden.
-  Y no incluye el **price impact** (1.2% en ese mismo ejemplo), que es un
-  costo real, separado, y que escala con el tamano de la apuesta y la
-  liquidez del momento -- no esta incluido en el `--fee` de `backtest.py`.
-  El breakeven de 50.1% que reporta el backtest es, por lo tanto, un
-  piso optimista, no el costo total real de operar.
+- **La fee de 2.0% (`feeRateBps: 200`) esta confirmada en vivo** via
+  `market/list` para el topic BTC Up or Down 5m -- ya no es una
+  suposicion. Pero el `slippageBps: 1000` (10%) es la tolerancia MAXIMA
+  configurada, no el price impact real promedio de ejecutar una orden --
+  eso depende de la liquidez del order book en cada momento y no esta
+  incluido en el `--fee` de `backtest.py`. El breakeven de 50.51% que
+  reporta el backtest es, por lo tanto, un piso optimista (solo fee), no
+  el costo total real de operar.
 - **Fuente de precio:** se uso el precio de ultima operacion de Binance
   (`data-api.binance.vision`), no el mid-price de Chainlink Data Streams
   que realmente resuelve el mercado (ese requiere API key paga). En
@@ -346,29 +363,35 @@ microestructura de mercado (bid-ask bounce).
 
 Lo que cambio en esta ronda:
 
-1. **La fee real (~0.4%, de un ejemplo concreto en la doc de Agentic
-   Wallet) es mucho mas chica que el 10% que se habia asumido antes** por
-   un texto ambiguo de la UI. Con el breakeven correcto (50.1% en vez de
-   52.6%), la mayoria de las variantes contrarian/mean-reversion lo
-   superan de forma estadisticamente significativa.
-2. **Pero eso no incluye price impact** (1.2% en ese mismo ejemplo,
-   costo real y aparte, que crece con el tamano de la apuesta) -- con un
-   margen de apenas 1-3 puntos porcentuales sobre breakeven-por-fee, el
-   price impact real podria facilmente borrar la ventaja. Esto es lo
-   unico que falta medir con datos reales, no con una fee generica de un
-   ejemplo de documentacion.
+1. **La fee real (2.0%, `feeRateBps: 200`, confirmada en vivo via
+   `market/list`) es mucho mas chica que el 10% que se habia asumido al
+   principio** por un texto ambiguo de la UI -- que ahora creo que en
+   realidad era el `slippageBps: 1000` (10% de tolerancia maxima de
+   slippage), no una fee. Con el breakeven correcto (50.51% en vez de
+   52.6%), 23 de ~60 variantes contrarian/mean-reversion lo superan de
+   forma estadisticamente significativa.
+2. **Pero eso no incluye el price impact real de ejecutar** -- el 10%
+   que trae la API es un limite maximo configurado, no el costo promedio
+   real, que depende de la liquidez del order book en cada momento. Con
+   un margen de apenas 0.5-3 puntos porcentuales sobre breakeven-por-fee,
+   un price impact real de 1-2% ya podria borrar la ventaja. Esto es lo
+   unico que falta medir con datos reales de order book, no con un
+   limite configurado.
 3. Encontramos los endpoints REST y WebSocket reales para leer cuotas en
-   vivo (`order-book`, topic `web3_prediction_orderbook_{marketId}`) --
-   el canal que se probo primero (`wallet-events`) resulto ser solo
-   notificaciones de ordenes propias, no cuotas de mercado. Con eso,
-   `local_odds_logger.py` ahora apunta al lugar correcto.
+   vivo (`order-book`, topic `web3_prediction_orderbook_{marketId}` con
+   `marketId` numerico real, ej. `6815131`) -- el canal que se probo
+   primero (`wallet-events`) resulto ser solo notificaciones de ordenes
+   propias, no cuotas de mercado. Con eso, `local_odds_logger.py` ahora
+   apunta al lugar correcto y ya identifico en vivo el topic/mercado
+   actual la primera vez que corrio.
 
-**Siguiente paso real, en orden:** (1) correr `local_odds_logger.py` en
-tu dispositivo con una API key nueva (nunca la anterior expuesta en el
-chat) para loguear cuotas + resultado reales por un tiempo; (2) con eso,
-medir el price impact real en la practica, no el del ejemplo generico de
-la doc; (3) recien ahi comparar el costo total real contra el ~51-53% de
-acierto medido aca para saber si de verdad sobra margen. Hasta entonces,
-el edge medido es prometedor pero **no confirmado como rentable neto de
-todos los costos reales** -- y sigue sin haber automatizacion de clicks
-ni ordenes en este proyecto.
+**Siguiente paso real, en orden:** (1) terminar de correr
+`local_odds_logger.py` en tu dispositivo con una API key nueva (nunca la
+anterior expuesta en el chat) para loguear cuotas + resultado reales por
+un tiempo; (2) con eso, medir el price impact real en la practica, no un
+limite maximo configurado; (3) recien ahi comparar el costo total real
+contra el ~51-53% de acierto medido aca para saber si de verdad sobra
+margen. Hasta entonces, el edge medido es prometedor y ahora con una fee
+real confirmada en vez de adivinada, pero **todavia no confirmado como
+rentable neto de todos los costos reales** -- y sigue sin haber
+automatizacion de clicks ni ordenes en este proyecto.

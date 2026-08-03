@@ -114,7 +114,7 @@ def api_get(path: str, params: dict = None, signed: bool = None):
                     "path": path,
                     "params": {k: v for k, v in params.items() if k not in ("timestamp", "recvWindow")},
                     "status": resp.status_code,
-                    "body": resp.text[:4000],
+                    "body": resp.text[:20000],
                 }
             )
             + "\n"
@@ -134,69 +134,83 @@ def _first_present(d: dict, candidates):
 
 
 def find_btc_5m_market():
-    """Try to locate the live 'BTC Up or Down 5m' market and return its
-    market id (raw dict too, for inspection). Tries market/search first,
-    falls back to market/list + manual filtering. Field names are educated
-    guesses -- prints raw JSON at every step so you can correct me."""
+    """Locate the live 'BTC Up or Down 5m' round and return its numeric
+    marketId (plus the raw topic dict, for inspection).
+
+    Confirmed real schema (market/search returns -1022 regardless of
+    param name tried -- skip it, market/list works fine unsigned-or-not):
+
+        {"marketTopics": [{
+            "marketTopicId": 4455880,        # the recurring "5m game" itself
+            "slug": "btc-updown-5m-<ts>",
+            "title": "BTC Up or Down 5m",
+            "feeRateBps": 200,                # 200 bps = 2% -- the REAL fee
+            "slippageBps": 1000,               # 1000 bps = 10% max slippage
+                                                # tolerance (this is almost
+                                                # certainly the "Automatico |
+                                                # 10%" text seen in the app UI
+                                                # -- NOT a fee, as first guessed)
+            "variantData": {"priceFeedProvider": "CHAINLINK", ...},
+            "markets": [{
+                "marketId": 6815131,           # <-- THIS is what order-book wants
+                "externalId": "1113650",
+                "conditionId": "0x...",
+                "status": "REGISTERED",
+                ...                             # likely has an outcomes/tokens list
+            }]
+        }]}
+    """
     print("\n=== Paso 1: buscando el mercado 'BTC Up or Down 5m' ===")
-
-    for keyword_param in ("keyword", "query", "q", "search"):
-        resp = api_get(
-            "/sapi/v1/w3w/wallet/prediction/market/search",
-            {keyword_param: "BTC Up or Down 5m"},
-        )
-        if resp.status_code == 200:
-            break
-    else:
-        print("market/search no respondio 200 con ningun nombre de parametro probado.")
-        resp = None
-
-    candidates = []
-    if resp is not None and resp.status_code == 200:
-        try:
-            data = resp.json()
-        except ValueError:
-            data = None
-        print("Respuesta cruda de market/search:", json.dumps(data, indent=2)[:2000] if data else resp.text[:500])
-        items = _first_present(data, ("data", "items", "markets", "list", "result")) if isinstance(data, dict) else data
-        if isinstance(items, list):
-            candidates.extend(items)
-
-    if not candidates:
-        print("\nProbando market/list como alternativa...")
-        resp2 = api_get("/sapi/v1/w3w/wallet/prediction/market/list", {"limit": 50})
-        if resp2.status_code == 200:
-            try:
-                data2 = resp2.json()
-            except ValueError:
-                data2 = None
-            print("Respuesta cruda de market/list:", json.dumps(data2, indent=2)[:2000] if data2 else resp2.text[:500])
-            items2 = _first_present(data2, ("data", "items", "markets", "list", "result")) if isinstance(data2, dict) else data2
-            if isinstance(items2, list):
-                candidates.extend(items2)
-
-    match = None
-    for item in candidates:
-        if not isinstance(item, dict):
-            continue
-        title = str(_first_present(item, ("title", "name", "topic", "question")) or "")
-        if "btc" in title.lower() and "5" in title:
-            match = item
-            break
-
-    if not match:
-        print(
-            "\nNo pude identificar automaticamente el mercado en la respuesta. "
-            "Mira el JSON crudo de arriba (y en data/raw_api_responses.jsonl) y "
-            "decime cual es el campo con el id del mercado 'BTC Up or Down 5m' -- "
-            "lo agrego al codigo."
-        )
+    resp = api_get("/sapi/v1/w3w/wallet/prediction/market/list", {"limit": 50})
+    if resp.status_code != 200:
+        print("market/list no respondio 200. Revisa el error de arriba.")
         return None, None
 
-    market_id = _first_present(match, ("id", "marketId", "topicId", "marketID"))
-    print(f"\nMercado encontrado: {match}")
-    print(f"market_id extraido: {market_id}")
-    return market_id, match
+    try:
+        data = resp.json()
+    except ValueError:
+        print("Respuesta no es JSON valido:", resp.text[:500])
+        return None, None
+
+    topics = data.get("marketTopics") if isinstance(data, dict) else None
+    if not isinstance(topics, list):
+        print("No encontre 'marketTopics' en la respuesta. JSON crudo:")
+        print(json.dumps(data, indent=2)[:3000])
+        return None, None
+
+    topic = None
+    for t in topics:
+        title = str(_first_present(t, ("title", "name", "question")) or "")
+        if "btc" in title.lower() and "up or down" in title.lower():
+            topic = t
+            break
+
+    if not topic:
+        print(f"No encontre un topic 'BTC Up or Down' entre {len(topics)} topics devueltos.")
+        titles = [t.get("title") for t in topics if isinstance(t, dict)]
+        print("Titulos disponibles:", titles)
+        return None, None
+
+    fee_bps = topic.get("feeRateBps")
+    slippage_bps = topic.get("slippageBps")
+    print(f"\nTopic encontrado: {topic.get('title')} (marketTopicId={topic.get('marketTopicId')})")
+    print(f"  feeRateBps={fee_bps} (-> {fee_bps/100 if fee_bps is not None else '?'}% fee real)")
+    print(f"  slippageBps={slippage_bps} (-> {slippage_bps/100 if slippage_bps is not None else '?'}% slippage tolerance)")
+
+    markets = topic.get("markets")
+    if not isinstance(markets, list) or not markets:
+        print("El topic no trae una lista 'markets' con la ronda actual. JSON crudo del topic:")
+        print(json.dumps(topic, indent=2)[:3000])
+        return None, None
+
+    current_round = markets[0]
+    market_id = current_round.get("marketId")
+    print(f"\nRonda actual: {current_round.get('title')}")
+    print(f"marketId extraido: {market_id}  (status={current_round.get('status')})")
+    print("\nJSON completo de la ronda actual (para ver el campo de outcomes/tokens):")
+    print(json.dumps(current_round, indent=2)[:3000])
+
+    return market_id, current_round
 
 
 def get_order_book(market_id, outcome_token_id=None):

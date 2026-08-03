@@ -201,8 +201,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--fee",
         type=float,
-        default=0.4,
-        help="Comision asumida en %% (default 0.4, del ejemplo real en la doc de Agentic Wallet: 0.02 USDT de fee sobre una compra de 5 USDT). No incluye price impact/slippage, que es un costo aparte y depende del tamano de la apuesta.",
+        default=2.0,
+        help="Comision asumida en %% (default 2.0 = feeRateBps=200, confirmado en vivo via GET market/list para el topic BTC Up or Down 5m). No incluye price impact/slippage (slippageBps=1000 = 10% de tolerancia maxima, tambien confirmado en vivo), que es un costo aparte y depende del tamano de la apuesta.",
     )
     args = parser.parse_args()
 
