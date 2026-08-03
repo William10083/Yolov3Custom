@@ -207,16 +207,29 @@ def find_btc_5m_market():
     market_id = current_round.get("marketId")
     print(f"\nRonda actual: {current_round.get('title')}")
     print(f"marketId extraido: {market_id}  (status={current_round.get('status')})")
-    print("\nJSON completo de la ronda actual (para ver el campo de outcomes/tokens):")
-    print(json.dumps(current_round, indent=2)[:3000])
 
-    return market_id, current_round
+    # market/list already includes live price/chance/tokenId per outcome --
+    # no need for a separate market/detail call at all.
+    outcomes = current_round.get("outcomes")
+    if isinstance(outcomes, list):
+        print("Outcomes (ya trae precio/probabilidad en vivo):")
+        for o in outcomes:
+            print(f"  {o.get('name')}: price={o.get('price')} chance={o.get('chance')} tokenId={o.get('tokenId')}")
+
+    return market_id, current_round, topic
 
 
-def get_order_book(market_id, outcome_token_id=None):
-    params = {"marketId": market_id}
-    if outcome_token_id:
-        params["outcomeTokenId"] = outcome_token_id
+def get_order_book(market_id, vendor, token_id=None, condition_id=None):
+    # order-book's required params, discovered one at a time from live
+    # -3026 "required parameter X not present" errors: marketId alone
+    # wasn't enough, it also wants `vendor`. Passing everything we have
+    # (tokenId, conditionId) defensively in case another one turns out to
+    # be required too -- extra/unused params shouldn't hurt.
+    params = {"marketId": market_id, "vendor": vendor}
+    if token_id:
+        params["tokenId"] = token_id
+    if condition_id:
+        params["conditionId"] = condition_id
     return api_get("/sapi/v1/w3w/wallet/prediction/order-book", params)
 
 
@@ -234,24 +247,48 @@ def log_snapshot(market_id, resp):
         writer.writerow([int(time.time() * 1000), market_id, resp.status_code, resp.text[:2000]])
 
 
-def poll_loop(market_id, market_detail):
-    ensure_log_file()
-    print(f"\n=== Paso 2: polleando order-book cada {POLL_INTERVAL_SECONDS}s (Ctrl+C para parar) ===")
-    outcome_token_id = None
-    outcomes = _first_present(market_detail, ("outcomes", "tokens")) if market_detail else None
+def _extract_poll_context(current_round, topic):
+    vendor = topic.get("vendor")
+    condition_id = current_round.get("conditionId")
+    token_id = None
+    outcomes = current_round.get("outcomes")
     if isinstance(outcomes, list):
         for o in outcomes:
-            name = str(_first_present(o, ("name", "outcomeName", "title")) or "").lower()
-            if name in ("up", "yes"):
-                outcome_token_id = _first_present(o, ("tokenId", "outcomeTokenId", "id"))
+            if str(o.get("name", "")).lower() == "up":
+                token_id = o.get("tokenId")
                 break
+    return vendor, condition_id, token_id
+
+
+ROUND_SECONDS = 5 * 60
+REFRESH_MARGIN_SECONDS = 20  # refresh a bit before the round actually ends
+
+
+def poll_loop(market_id, current_round, topic):
+    ensure_log_file()
+    print(f"\n=== Paso 2: polleando order-book cada {POLL_INTERVAL_SECONDS}s (Ctrl+C para parar) ===")
+
+    vendor, condition_id, token_id = _extract_poll_context(current_round, topic)
+    next_refresh_at = time.time() + ROUND_SECONDS - REFRESH_MARGIN_SECONDS
 
     while True:
         try:
-            resp = get_order_book(market_id, outcome_token_id)
+            if time.time() >= next_refresh_at:
+                # Rounds only last 5 minutes -- find the new live round
+                # instead of polling a market that's about to close.
+                print("\n[rollover] buscando la ronda actual de nuevo...")
+                new_market_id, new_round, new_topic = find_btc_5m_market()
+                if new_market_id is not None:
+                    market_id, current_round, topic = new_market_id, new_round, new_topic
+                    vendor, condition_id, token_id = _extract_poll_context(current_round, topic)
+                next_refresh_at = time.time() + ROUND_SECONDS - REFRESH_MARGIN_SECONDS
+
+            resp = get_order_book(market_id, vendor, token_id, condition_id)
             log_snapshot(market_id, resp)
             if resp.status_code == 200:
-                print(f"[snapshot] {resp.text[:200]}")
+                print(f"[snapshot] {resp.text[:300]}")
+            else:
+                print(f"[snapshot-error] {resp.status_code} {resp.text[:300]}")
         except KeyboardInterrupt:
             print("Detenido por el usuario.")
             return
@@ -261,19 +298,11 @@ def poll_loop(market_id, market_detail):
 
 
 if __name__ == "__main__":
-    market_id, market_detail = find_btc_5m_market()
+    market_id, current_round, topic = find_btc_5m_market()
     if market_id is None:
         print(
             "\nNo se pudo continuar automaticamente. Revisa data/raw_api_responses.jsonl, "
             "compartime lo que encontraste, y ajusto la extraccion de campos."
         )
     else:
-        detail_resp = api_get("/sapi/v1/w3w/wallet/prediction/market/detail", {"marketId": market_id})
-        detail_json = None
-        if detail_resp.status_code == 200:
-            try:
-                detail_json = detail_resp.json()
-                print("Detalle del mercado:", json.dumps(detail_json, indent=2)[:2000])
-            except ValueError:
-                pass
-        poll_loop(market_id, detail_json)
+        poll_loop(market_id, current_round, topic)
