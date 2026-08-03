@@ -28,10 +28,11 @@ ROUND_SECONDS = 5 * 60
 def build_rounds(candles):
     """Build non-overlapping 5-minute rounds aligned to the clock (:00,:05,:10,...).
 
-    start_price/end_price use the close of the 1m candle at each boundary,
-    matching how the app's countdown resolves a round from t to t+5min.
+    Per the app's own rules ("use the open price of the candlestick
+    corresponding to the market's end time"), start_price/end_price use the
+    OPEN of the 1m candle at each boundary, not the close.
     """
-    by_time = {c["open_time_ms"]: c["close"] for c in candles}
+    by_time = {c["open_time_ms"]: c["open"] for c in candles}
     if not candles:
         return []
 

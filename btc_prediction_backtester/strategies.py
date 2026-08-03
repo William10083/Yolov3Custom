@@ -23,9 +23,16 @@ class MarketContext:
         return self.by_time.get(ms)
 
     def close_minutes_before(self, ref_ms, minutes_back):
-        """Close price exactly `minutes_back` minutes before ref_ms, or None."""
+        """Price exactly `minutes_back` minutes before ref_ms, or None.
+
+        Uses the OPEN of the candle at that exact timestamp -- the open of
+        the candle at time T is the price AT T (matching how backtest.py
+        defines round boundaries). Using that candle's CLOSE instead would
+        leak ~1 minute of future price into minutes_back=0 (the candle's
+        close is the price one minute later, at T+60s).
+        """
         c = self.by_time.get(ref_ms - minutes_back * 60_000)
-        return c["close"] if c else None
+        return c["open"] if c else None
 
     def window(self, ref_ms, minutes):
         """List of candles in [ref_ms - minutes*60s, ref_ms), in order."""
@@ -38,7 +45,7 @@ class MarketContext:
 
     def pct_move(self, ref_ms, minutes):
         start = self.close_minutes_before(ref_ms, minutes)
-        end = self.close_minutes_before(ref_ms, 0) or self.by_time.get(ref_ms - 60_000, {}).get("close")
+        end = self.close_minutes_before(ref_ms, 0)
         if start is None or end is None or start == 0:
             return None
         return (end - start) / start * 100
@@ -58,7 +65,7 @@ class MarketContext:
         win = self.window(ref_ms, minutes)
         if len(win) < 3:
             return None
-        closes = [c["close"] for c in win]
+        closes = [c["open"] for c in win]
         rets = [(closes[i] - closes[i - 1]) / closes[i - 1] for i in range(1, len(closes)) if closes[i - 1]]
         if len(rets) < 2:
             return None
@@ -194,6 +201,36 @@ def volume_imbalance_contrarian(minutes, threshold):
     return strategy
 
 
+class _RunningMedian:
+    """Two-heap running median: O(log n) insert, O(1) query."""
+
+    def __init__(self):
+        self._lo = []  # max-heap (negated values): lower half
+        self._hi = []  # min-heap: upper half
+
+    def add(self, x):
+        import heapq
+
+        if not self._lo or x <= -self._lo[0]:
+            heapq.heappush(self._lo, -x)
+        else:
+            heapq.heappush(self._hi, x)
+        if len(self._lo) > len(self._hi) + 1:
+            heapq.heappush(self._hi, -heapq.heappop(self._lo))
+        elif len(self._hi) > len(self._lo):
+            heapq.heappush(self._lo, -heapq.heappop(self._hi))
+
+    def median(self):
+        if not self._lo:
+            return None
+        if len(self._lo) > len(self._hi):
+            return -self._lo[0]
+        return (-self._lo[0] + self._hi[0]) / 2
+
+    def __len__(self):
+        return len(self._lo) + len(self._hi)
+
+
 def vol_regime_gated(base_strategy, minutes, vol_lookback, mode):
     """Wrap base_strategy so it only fires during a volatility regime.
 
@@ -202,17 +239,17 @@ def vol_regime_gated(base_strategy, minutes, vol_lookback, mode):
     NOTE: uses an expanding median of vol seen up to now, so it's still
     walk-forward (no lookahead into the future).
     """
-    seen_vols = []
+    running = _RunningMedian()
 
     def strategy(history, ctx, start_ms):
         vol = ctx.realized_vol(start_ms, vol_lookback)
         if vol is None:
             return None
-        if len(seen_vols) < 20:
-            seen_vols.append(vol)
+        if len(running) < 20:
+            running.add(vol)
             return None
-        median = statistics.median(seen_vols)
-        seen_vols.append(vol)
+        median = running.median()
+        running.add(vol)
         is_high = vol > median
         if (mode == "high" and not is_high) or (mode == "low" and is_high):
             return None

@@ -15,15 +15,40 @@ bots de terceros sin resultados verificables, esto corre las estrategias
 mas obvias contra datos reales y reporta si de verdad ganan mas de lo que
 cuesta la comision.
 
+## Que mercado es realmente esto
+
+Segun la pantalla "Reglas" de la app (confirmado por captura): el mercado
+resuelve via un **oraculo de Chainlink Data Streams** (BTC/USDT
+top-of-book) y se opera como un **mercado CLOB de acciones binarias**
+(comprar "Up" al % mostrado, cada accion paga $1 USDT si acierta) -- la
+misma arquitectura que los mercados BTC 5-min de Polymarket. No es un
+simple pool de apuestas de una casa de apuestas; es un mercado de
+prediccion real con creadores de mercado del otro lado.
+
+**Importante sobre la fuente de datos usada aca:** `data_fetch.py` usa
+velas publicas de Binance (`data-api.binance.vision`), que son el precio
+de la **ultima operacion ejecutada** cada minuto -- NO el mismo dato que
+usa el oraculo de Chainlink (que es el **precio medio entre bid y ask**,
+mid-price). Confirme que la API de Chainlink Data Streams requiere
+autenticacion paga (API key + HMAC) para historico, asi que no es
+accesible gratis como lo que usamos aca. En la practica ambos precios se
+mueven casi pegados en BTC/USDT en Binance (mercado muy liquido, spread
+de centavos), asi que para conclusiones estadisticas agregadas sobre
+decenas de miles de rondas la diferencia es ruido -- pero no es
+identico, y vale aclararlo en vez de asumirlo.
+
 ## Como funciona
 
 1. `data_fetch.py` descarga velas de 1 minuto de BTCUSDT desde el mirror
    publico de datos de mercado de Binance (`data-api.binance.vision`,
    sin API key, sin acceso a cuenta ni ordenes -- solo precios historicos).
 2. `backtest.py` arma rondas de 5 minutos alineadas al reloj (:00, :05,
-   :10, ...) igual que el juego, y evalua cada estrategia de forma
-   **walk-forward**: cada prediccion solo puede usar datos de ANTES del
-   inicio de esa ronda (cero adelanto de informacion / data leakage).
+   :10, ...) igual que el juego, usando el precio de **apertura** de la
+   vela limite (asi lo especifica la regla de resolucion: "use the open
+   price of the candlestick corresponding to the market's end time"), y
+   evalua cada estrategia de forma **walk-forward**: cada prediccion solo
+   puede usar datos de ANTES del inicio de esa ronda (cero adelanto de
+   informacion / data leakage).
 3. Los datos se dividen en dos mitades: in-sample (para mirar) y
    out-of-sample (para confirmar), asi no nos enganamos con una
    estrategia que solo se ve bien por azar.
@@ -53,7 +78,33 @@ cuesta la comision.
   vendedora en los ultimos 3/5/15 min, y apuesta con o contra esa presion.
 - Variantes con filtro de regimen de volatilidad: solo disparan cuando la
   volatilidad reciente esta por encima/debajo de la mediana vista hasta
-  ese momento (expanding median, sigue siendo walk-forward).
+  ese momento (mediana corriente con dos heaps, O(log n), sigue siendo
+  walk-forward).
+
+## Calibracion del precio de mercado (`option_edge_analysis.py`)
+
+Dado que este es un mercado tipo opcion binaria (no una casa de apuestas
+de comision fija), la pregunta relevante no es solo "¿se puede predecir
+la direccion?" sino "¿el precio en vivo (%) refleja bien la probabilidad
+real, o el market maker ignora el mean-reversion que ya encontramos?".
+Este script simula, en cada minuto dentro de cada ronda historica, cual
+seria el precio "justo" bajo un modelo naive (random walk sin memoria,
+calibrado con la volatilidad real de los datos), y lo compara contra el
+resultado real -- separando los casos donde el ultimo minuto siguio la
+tendencia ("trending") de los casos donde ya empezo a revertir
+("reverting"). Si el mercado no incorpora el mean-reversion, la categoria
+"reverting" deberia acertar mas que lo que predice el modelo naive.
+
+Resultado (180 dias, decenas de miles de checkpoints por bucket): el
+modelo naive esta razonablemente bien calibrado (desviaciones de 1-5
+puntos porcentuales, no sistematicas en una direccion), y **no hay
+diferencia significativa entre "trending" y "reverting" para el mismo
+nivel de gap** (todas las brechas quedan por debajo de 3 puntos
+porcentuales, con muestras de miles a decenas de miles de casos por
+grupo). Conclusion: el momentum del ultimo minuto, dado que ya se conoce
+cuanto se desvio el precio del inicio, no aporta señal extra explotable.
+La reversion que existe (medida en `backtest.py` a nivel de ronda
+completa) ya esta absorbida en el nivel del gap.
 
 ## Analisis de tu lista manual (`manual_sequence_analysis.py`)
 
@@ -67,17 +118,22 @@ completa corriendo el script.
 
 Se repitio el analisis con ~26x mas datos que la primera corrida (45 dias)
 para tener suficiente potencia estadistica. Con mas muestra, aparecio algo
-que antes no se veia con claridad:
+que antes no se veia con claridad. (Nota: en el camino aparecieron y se
+corrigieron dos bugs reales -- un problema de rendimiento O(n^2) en las
+estrategias de regimen de volatilidad, y una fuga de informacion de ~1
+minuto hacia el futuro en `MarketContext` que aparecio al cambiar de
+close a open price. Los numeros de abajo son de la version ya corregida
+y verificada.)
 
 ```
-Baseline real Up/Down en todo el periodo: 49.6% Up / 50.4% Down
+Baseline real Up/Down en todo el periodo: 49.9% Up / 50.1% Down
 Con una comision asumida de 10%, hace falta un win rate > 52.6% para ganar en el largo plazo
 
 Variance ratio test (estructura del precio en si, sin ninguna regla):
-  k= 2: VR=0.984  z=-3.72  -> MEAN REVERSION significativo (VR<1, z<-2)
-  k= 3: VR=0.991  z=-1.43  -> random walk (VR~1)
-  k= 5: VR=0.982  z=-1.87  -> random walk (VR~1)
-  k=10: VR=0.948  z=-3.53  -> MEAN REVERSION significativo (VR<1, z<-2)
+  k= 2: VR=0.994  z=-1.31  -> random walk (VR~1)
+  k= 3: VR=0.984  z=-2.38  -> MEAN REVERSION significativo (VR<1, z<-2)
+  k= 5: VR=0.977  z=-2.39  -> MEAN REVERSION significativo (VR<1, z<-2)
+  k=10: VR=0.942  z=-3.90  -> MEAN REVERSION significativo (VR<1, z<-2)
 
 Ninguna estrategia supera el breakeven de forma estadisticamente
 significativa (limite inferior del IC95% out-of-sample > breakeven)
@@ -94,12 +150,12 @@ estrategias contrarian/mean-reversion, que ahora con mucha mas muestra
 tienen intervalos de confianza bien angostos y consistentemente por
 encima de 50%:
 
-- `contrarian_last_1`: 51.4% OOS, IC95% [50.8%, 52.0%] -- el intervalo
+- `contrarian_last_1`: 51.5% OOS, IC95% [50.9%, 52.1%] -- el intervalo
   entero esta arriba de 50%, o sea, el efecto es real, no azar.
 - `streak_reversion_3/4/5` (apostar reversion tras 3-5 rondas iguales
-  seguidas): 53.2%-53.7% OOS -- el mas alto de todos, pero con menos
-  muestra (n=1300-6000) el intervalo baja hasta ~51%.
-- `micro_mean_reversion_15m`: 51.6%-52.2% OOS, consistente.
+  seguidas): 51.9%-52.3% OOS -- con menos muestra (n=1300-6000) el
+  intervalo es mas ancho, entre ~50% y ~55%.
+- `micro_mean_reversion_15m`: 51.0% OOS, consistente con el resto.
 
 **Pero incluso asi, nada le gana de forma robusta a una comision del 10%.**
 El punto (no el limite inferior del IC) de `streak_reversion_3` y
@@ -113,6 +169,34 @@ baja -- por ejemplo, `contrarian_last_1` necesitaria una comision menor a
 ahi si empezaria a ser interesante. Pero no tenemos confirmado cual es la
 comision real de la plataforma (ver Limitaciones).
 
+## Monitoreo en vivo -- APIs oficiales (no screen-scraping)
+
+En vez de leer la pantalla o simular clicks, la via correcta es una API
+oficial. Confirme que existen dos:
+
+- **Binance Wallet Prediction Markets API** (lanzada junio 2026): datos
+  en tiempo real de mercados de prediccion, odds, liquidez, y ejecucion
+  de ordenes. Requiere solicitud via el Binance Developer Platform (no es
+  de acceso libre inmediato).
+- **Predict.fun API** (la infraestructura real detras de este mercado):
+  tiene un endpoint publico de series historicas de precios, ideal para
+  backtesting con las cuotas reales en vez de nuestra aproximacion
+  Gaussiana. Probe el endpoint:
+  - Testnet (`api-testnet.predict.fun`): abierto, sin API key, pero solo
+    tiene mercados de prueba/historicos (ej. BTC Up/Down de 15 min de
+    Dic 2025-Feb 2026), no el mercado de 5 min en vivo que usas.
+  - Mainnet (`api.predict.fun`): devuelve `401 unauthorized` sin API key
+    -- ahi es donde estaria el mercado real, pero hace falta pedir acceso.
+
+**Siguiente paso si se quiere seguir con esto:** conseguir una API key
+(de Binance o de Predict.fun mainnet). Con eso, se puede construir un
+logger que capture cuotas reales + resultado de cada ronda de forma
+continua, y comparar esas cuotas reales contra la probabilidad real
+medida en este backtest -- eso si respondaria con precision si hay
+mispricing explotable, en vez de la aproximacion que hicimos con
+`option_edge_analysis.py`. Sin la key no se puede avanzar mas en este
+punto especifico.
+
 ## Como correrlo vos mismo
 
 ```bash
@@ -120,23 +204,30 @@ cd btc_prediction_backtester
 pip install -r requirements.txt
 python3 data_fetch.py --days 180      # descarga y cachea datos reales (no hay datos en git)
 python3 backtest.py --fee 10          # corre el backtest completo
+python3 option_edge_analysis.py       # calibracion del "precio justo" vs resultados reales
 python3 manual_sequence_analysis.py   # analiza tu lista de 36 resultados
 ```
 
 ## Limitaciones importantes
 
-- El 59%/40% que se ve en la app es la distribucion del pool de apuestas
-  (cuanta gente aposto a cada lado), **no** un dato de precio -- no hay
-  forma de reconstruir eso historicamente con datos publicos, asi que
-  no esta modelado aqui.
-- La comision real de la plataforma no es publica con certeza; el
-  parametro `--fee` es un supuesto ajustable, no un dato confirmado. Esto
-  es ahora el dato que mas importa: el efecto de mean-reversion encontrado
-  es real pero chico, y si la comision real es menor a la asumida (10%),
-  la conclusion podria cambiar.
-- El precio de resolucion exacto de cada ronda en la app puede diferir
-  ligeramente del close de la vela de 1m usado aqui (redondeo, fuente de
-  precio distinta, exchange distinto).
+- El %/% que se ve en la app **no es un pool de apuestas simple, es el
+  precio de un mercado CLOB tipo opcion binaria** (ver seccion "Que
+  mercado es realmente esto"). No hay forma de reconstruir ese precio
+  historico sin una API key de Predict.fun/Binance, asi que no esta
+  modelado con datos reales aqui -- `option_edge_analysis.py` lo
+  aproxima con un modelo Gaussiano calibrado con volatilidad historica,
+  que es una aproximacion razonable pero no el dato real.
+- El termino "comision del 10%" que se uso en corridas anteriores era una
+  suposicion mia a partir de un texto ambiguo en la UI ("Automatico |
+  10%") -- no esta confirmado que sea una fee. Con un mercado tipo CLOB,
+  el costo real esta en el spread del libro de ordenes, no en una
+  comision fija. El parametro `--fee` de `backtest.py` sigue siendo util
+  como referencia/limite superior, pero no es un dato verificado.
+- **Fuente de precio:** se uso el precio de ultima operacion de Binance
+  (`data-api.binance.vision`), no el mid-price de Chainlink Data Streams
+  que realmente resuelve el mercado (ese requiere API key paga). En
+  agregado sobre 52k rondas la diferencia es ruido, pero no son
+  identicos.
 - La granularidad de datos publicos mas fina disponible es de 1 minuto.
   Bots documentados para juegos similares en Polymarket dicen encontrar
   su margen en los **ultimos 10 segundos** antes del cierre -- eso no se
@@ -148,13 +239,34 @@ python3 manual_sequence_analysis.py   # analiza tu lista de 36 resultados
 
 ## Conclusion honesta
 
-Con 180 dias de datos reales (52k rondas), a diferencia de la primera
-corrida con menos datos, **si aparecio una senal real**: un mean-reversion
-estadisticamente significativo (confirmado por un test independiente, no
-solo por reglas ad-hoc) de unos 51-53% de acierto. Es un hallazgo genuino
-y consistente con la literatura de microestructura de mercado (bid-ask
-bounce). Pero sigue sin alcanzar para cubrir una comision del 10% de forma
-robusta. La barrera hoy no es "no hay patron" -- es "el patron es
-demasiado chico para la comision asumida". El siguiente paso util, si se
-quiere seguir, es confirmar la comision real de la plataforma (no
-automatizar nada mientras ese numero sea un supuesto).
+Con 180 dias de datos reales (52k rondas): **si hay una senal real, chica
+y consistente.** El variance-ratio test (independiente de cualquier regla
+inventada) confirma mean-reversion estadisticamente significativo en los
+retornos de BTC a 5 min, y las estrategias contrarian/streak-reversion lo
+capturan en la practica: ~51-52% de acierto out-of-sample, de forma
+consistente entre corridas y con intervalos de confianza que no incluyen
+50% en los casos con mas muestra. Es un hallazgo genuino, consistente con
+microestructura de mercado (bid-ask bounce).
+
+Dos cosas nuevas de esta ronda cambian el diagnostico:
+
+1. Este no es un juego de comision fija -- es un mercado de opciones
+   binarias tipo Polymarket, con creadores de mercado profesionales del
+   otro lado. Verificamos con `option_edge_analysis.py` que un modelo
+   naive (random walk puro) esta razonablemente bien calibrado contra
+   los resultados reales, y que el momentum de ultimo minuto no aporta
+   señal extra una vez que se conoce el gap actual -- es decir, **si
+   los market makers usan un modelo similar al naive, no dejan un hueco
+   obvio ahi**. No podemos confirmar si el pricing real del mercado
+   coincide con este modelo naive sin datos reales de cuotas.
+2. Existen APIs oficiales (Binance Wallet Prediction Markets API,
+   Predict.fun) para obtener esas cuotas reales -- pero ambas requieren
+   solicitar una API key, algo que queda del lado del usuario.
+
+**Siguiente paso real, en orden:** (1) decidir si vale la pena pedir
+acceso a alguna de esas APIs; (2) si se consigue, loguear cuotas reales
+vs resultado por un tiempo; (3) recien ahi comparar cuotas reales contra
+la probabilidad real medida aca. Hasta entonces, el edge medido (~51-52%)
+es interesante pero insuficiente para justificar apostar dinero real de
+forma automatizada -- y sigue sin haber automatizacion de clicks ni
+ordenes en este proyecto.
