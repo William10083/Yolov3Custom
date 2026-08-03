@@ -261,7 +261,17 @@ def _extract_poll_context(current_round, topic):
 
 
 ROUND_SECONDS = 5 * 60
-REFRESH_MARGIN_SECONDS = 20  # refresh a bit before the round actually ends
+REFRESH_MARGIN_SECONDS = 5  # refresh a bit before the actual round boundary
+STALE_REPEATS_BEFORE_FORCE_REFRESH = 3  # same timestamp this many times in a row -> book is frozen
+
+
+def next_round_boundary(now=None):
+    """Timestamp (s) of the next 5-minute wall-clock boundary -- rounds are
+    aligned to :00/:05/:10/... UTC (confirmed earlier: a shared market slug's
+    timestamp landed exactly on one), so this is accurate regardless of how
+    much of the current round was already elapsed when we joined it."""
+    now = now if now is not None else time.time()
+    return (int(now) // ROUND_SECONDS + 1) * ROUND_SECONDS
 
 
 def poll_loop(market_id, current_round, topic):
@@ -269,24 +279,40 @@ def poll_loop(market_id, current_round, topic):
     print(f"\n=== Paso 2: polleando order-book cada {POLL_INTERVAL_SECONDS}s (Ctrl+C para parar) ===")
 
     vendor, condition_id, token_id = _extract_poll_context(current_round, topic)
-    next_refresh_at = time.time() + ROUND_SECONDS - REFRESH_MARGIN_SECONDS
+    next_refresh_at = next_round_boundary() - REFRESH_MARGIN_SECONDS
+    last_snapshot_ts = None
+    stale_repeats = 0
 
     while True:
         try:
             if time.time() >= next_refresh_at:
-                # Rounds only last 5 minutes -- find the new live round
-                # instead of polling a market that's about to close.
-                print("\n[rollover] buscando la ronda actual de nuevo...")
+                print("\n[rollover] fin de ronda esperado, buscando la ronda actual de nuevo...")
                 new_market_id, new_round, new_topic = find_btc_5m_market()
                 if new_market_id is not None:
                     market_id, current_round, topic = new_market_id, new_round, new_topic
                     vendor, condition_id, token_id = _extract_poll_context(current_round, topic)
-                next_refresh_at = time.time() + ROUND_SECONDS - REFRESH_MARGIN_SECONDS
+                next_refresh_at = next_round_boundary() - REFRESH_MARGIN_SECONDS
+                last_snapshot_ts, stale_repeats = None, 0
 
             resp = get_order_book(market_id, vendor, token_id, condition_id)
             log_snapshot(market_id, resp)
             if resp.status_code == 200:
                 print(f"[snapshot] {resp.text[:300]}")
+                try:
+                    snapshot_ts = resp.json().get("timestamp")
+                except ValueError:
+                    snapshot_ts = None
+                if snapshot_ts is not None and snapshot_ts == last_snapshot_ts:
+                    stale_repeats += 1
+                    if stale_repeats >= STALE_REPEATS_BEFORE_FORCE_REFRESH:
+                        print(
+                            f"[stale] mismo timestamp {snapshot_ts} repetido "
+                            f"{stale_repeats} veces -- la ronda ya resolvio, forzando rollover"
+                        )
+                        next_refresh_at = 0  # force refresh on next loop iteration
+                else:
+                    stale_repeats = 0
+                last_snapshot_ts = snapshot_ts
             else:
                 print(f"[snapshot-error] {resp.status_code} {resp.text[:300]}")
         except KeyboardInterrupt:
