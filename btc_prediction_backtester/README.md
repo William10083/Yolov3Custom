@@ -6,6 +6,83 @@ alguna estrategia simple tiene una ventaja real sobre el juego de
 prediccion "BTC Up or Down 5m" (tipo el de la pestana Prediccion de
 Binance) antes de arriesgar dinero en el.
 
+## 🎯 Lo ultimo y lo unico que sobrevivio: el modelo combinado
+
+Todo lo que se probo antes de esto se probo **de a una señal por vez**. Un
+trader no lee asi: lee volatilidad, tendencia, flujo y posicion en el rango
+*juntos*, porque un movimiento del 0.1% significa una cosa en tendencia
+limpia y otra en chop. Ese hueco quedo abierto hasta el final.
+
+`predict_model.py` cierra el hueco: una regresion logistica sobre 15
+features (12 medidas + 3 interacciones), entrenada con el 60% mas viejo de
+los datos, ajustada en un 20% de validacion y medida **una sola vez** sobre
+el 20% mas reciente. Sin numpy ni sklearn, todo a mano.
+
+| que se midio | resultado |
+|---|---|
+| Todas las rondas, opinando siempre | **50.70%** IC95% [49.74%, 51.67%] — moneda al aire |
+| Solo cuando la confianza llega a 0.55 | **54.51%** (417/765) IC95% [50.97%, 58.01%] |
+| Breakeven con fee 2% a precio 0.50 | 50.51% |
+
+El primer renglon confirma todo lo anterior: obligado a opinar en cada
+ronda, el modelo no sabe nada. El segundo es lo interesante — el limite
+inferior del intervalo queda **por encima** del breakeven. En el 7% de las
+rondas donde el modelo se compromete, acierta mas de lo que cuesta jugar.
+
+### Los cuatro controles (`robustness_check.py`)
+
+Ese 54.5% tiene exactamente la forma de todos los falsos positivos que ya
+aparecieron en este repo, asi que recibio el mismo interrogatorio. Con l2 y
+umbral **fijos**, sin re-ajustar nada:
+
+1. **Estabilidad temporal** — 4/4 tramos del periodo de test por encima del
+   breakeven (52.4%, 57.5%, 54.7%, 53.3%). Un fluke vive en un tramo.
+2. **¿Es la deriva del periodo?** — el control que explico los resultados en
+   vivo. Dijo Up en el 79% de esas rondas y el periodo cerro 52.4% Up:
+   apostar Up a ciegas daba 52.4%, el modelo dio 54.5%. Y funciona en los
+   dos lados por separado (Up 54.4%, Down 55.0%).
+3. **Semillas** — 5 semillas de SGD distintas, rango 52.0%–54.7%, todas por
+   encima del breakeven.
+4. **El precio** — ver abajo. Este es el que todavia no esta contestado.
+
+### Lo que esto NO significa
+
+Las features salen de velas cerradas **antes** de que abra la ronda: el
+mercado ve exactamente lo mismo cuando cotiza. Entonces:
+
+    pagar 0.50 y acertar 54.5%  →  +6.8% por apuesta
+    pagar 0.56 y acertar 54.5%  →  −4.6% por apuesta
+
+Toda la diferencia entre ganar y perder esta en ese numero, y **no se puede
+sacar de datos historicos de velas** — hace falta el precio cotizado en esas
+rondas. Usando el limite inferior del IC, el precio maximo pagable es
+**0.499**. La confianza media del modelo es 56.0%. Si el mercado coincide
+con el modelo, cobra ~0.56 y no queda nada.
+
+`market_vs_model.py` contesta eso con los precios que ya se recolectaron en
+`round_outcomes.csv`. Es la unica pregunta abierta del proyecto.
+
+### Como usarlo
+
+```bash
+python3 predict_model.py       # entrena y mide (tarda unos minutos)
+python3 robustness_check.py    # los cuatro controles
+python3 export_model.py        # congela los pesos en model.json
+python3 market_vs_model.py     # modelo vs precio real cotizado  ← el que decide
+python3 predict_next.py        # predice la proxima vela de 5 min
+python3 predict_next.py --loop # se queda prediciendo cada ronda
+```
+
+`predict_next.py` carga `model.json` y **no entrena nada**. Cuando la
+confianza no llega al umbral dice "SIN OPINION", que es la respuesta correcta
+en ~93% de las rondas: forzar una opinion siempre es justamente lo que baja
+el acierto de 54.5% a 50.7%. Cuando si se pronuncia, muestra que features
+empujaron la decision (peso x valor estandarizado, no solo el peso) y el
+precio maximo pagable.
+
+**Nada de esto es permiso para apostar.** Es la primera cosa del proyecto que
+paso todos los filtros, y sigue faltando el filtro que mas importa.
+
 ## Por que existe
 
 Ver la conversacion que lo origino: el juego de 5 minutos parece tentador
@@ -893,3 +970,31 @@ margen. Hasta entonces, el edge medido es prometedor y ahora con una fee
 real confirmada en vez de adivinada, pero **todavia no confirmado como
 rentable neto de todos los costos reales** -- y sigue sin haber
 automatizacion de clicks ni ordenes en este proyecto.
+
+### Actualizacion final: donde quedo todo
+
+Lo de arriba quedo desmentido despues por los datos en vivo: las señales
+sueltas resultaron **vacias**, no invertidas, y el mercado resulto estar
+bien cotizado (ver las secciones del diagnostico). Eso sigue en pie.
+
+Lo que cambio al final es una cosa distinta y mas acotada: nunca se habian
+**combinado** los factores. Combinados en un solo modelo, y midiendo una
+sola vez sobre datos nunca vistos, aparece esto:
+
+- opinando en todas las rondas: 50.70% — nada, igual que antes;
+- opinando solo en el 7% de rondas donde el modelo se compromete: **54.51%**
+  (417/765), con el limite inferior del IC95% por encima del breakeven, y
+  aguantando los cuatro controles de `robustness_check.py`.
+
+Es el unico resultado del proyecto que paso todos los filtros. Y todavia no
+alcanza para decir que se gana plata, porque falta el filtro decisivo: **a
+que precio cotiza el mercado justamente esas rondas.** Las features son
+publicas y anteriores a la ronda; si el mercado las ve igual, cobra por
+adelantado toda la ventaja. `market_vs_model.py` contesta eso con los
+precios ya recolectados.
+
+Orden real de aca en adelante: (1) correr `market_vs_model.py` sobre los
+`round_outcomes.csv` que ya hay; (2) si el precio deja margen, seguir
+acumulando rondas con `predict_next.py` hasta ~400 predicciones de
+confianza, anotadas antes de conocer el resultado; (3) recien ahi discutir
+dinero. Sigue sin haber automatizacion de clicks ni de ordenes.
