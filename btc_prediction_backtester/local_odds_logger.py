@@ -386,6 +386,88 @@ def log_round_outcome(market_id, round_start_ms):
         print(f"[outcome] market_id={market_id} -> {outcome} (${start_price:,.2f} -> ${end_price:,.2f})")
     else:
         print(f"[outcome] market_id={market_id} -> no se pudo resolver (klines no disponibles todavia)")
+    return outcome
+
+
+def load_recent_outcomes(limit=10):
+    """Preload the last few resolved outcomes from disk so the streak
+    signal has context immediately on startup, not just from outcomes
+    resolved during this particular run."""
+    if not os.path.exists(OUTCOMES_FILE):
+        return []
+    with open(OUTCOMES_FILE, newline="") as f:
+        rows = list(csv.DictReader(f))
+    outcomes = [r["outcome"] for r in rows if r.get("outcome") in ("Up", "Down")]
+    return outcomes[-limit:]
+
+
+def send_notification(title, content):
+    """Push a phone notification via termux-api if available, always also
+    printing to console. Never raises -- a missing/broken termux-api must
+    not interrupt the polling loop."""
+    print(f"\n{'=' * 60}\n[ALERTA] {title}\n{content}\n{'=' * 60}\n")
+    try:
+        import subprocess
+
+        subprocess.run(
+            ["termux-notification", "--title", title, "--content", content],
+            timeout=5,
+            check=False,
+        )
+    except Exception:
+        pass  # no termux-api installed, or not on Termux -- console alert above still fires
+
+
+# Streak-reversion win rates from backtest.py's 180-day run at the REAL
+# confirmed fee (2% = feeRateBps 200, from live market/list data -- see
+# README). Only k>=3 is used as an alert trigger: k=2 fires roughly every
+# other round (P(same as previous)~50%), too frequent to treat as a
+# special "this round is worth a look" signal -- it's not what "solo
+# cuando es muy segura" (the original ask) meant.
+_STREAK_STATS = {
+    3: "53.2% OOS, IC95% [52.0%, 54.5%] (n~6000 en backtest historico)",
+    4: "53.2%-53.7% OOS, IC95% mas ancho ~[51%, 55%] (menos muestra)",
+}
+
+
+def check_streak_signal(recent_outcomes):
+    """NOT a validated live trading signal -- based on backtest.py's
+    historical 180-day backtest at the real 2% fee, which does NOT include
+    price impact/slippage (a real, separate cost -- see README). Not yet
+    confirmed against the live order-book data this script is collecting.
+    Use your own judgment; this is informational, not a recommendation."""
+    if len(recent_outcomes) < 3:
+        return None
+    last3 = recent_outcomes[-3:]
+    if len(set(last3)) != 1:
+        return None
+    streak_direction = last3[0]
+    streak_len = 4 if (len(recent_outcomes) >= 4 and recent_outcomes[-4] == streak_direction) else 3
+    suggested_side = "Down" if streak_direction == "Up" else "Up"
+    return {
+        "streak_direction": streak_direction,
+        "streak_len": streak_len,
+        "suggested_side": suggested_side,
+        "historical_stats": _STREAK_STATS[streak_len],
+    }
+
+
+SPREAD_TIGHT_THRESHOLD = 0.03  # arbitrary, adjustable -- not derived from any backtest
+
+
+def check_spread_alert(best_bid, best_ask, was_tight_before):
+    """Liquidity/execution-quality signal ONLY -- does NOT predict Up/Down.
+    option_edge_analysis.py found no exploitable directional signal from
+    within-round timing once the price gap is known, so this deliberately
+    doesn't claim to predict anything: it only flags when the spread is
+    tight (cheap to enter/exit right now) vs wide (expensive), for if you
+    already decided a side and want a reasonable moment to execute."""
+    if best_bid is None or best_ask is None:
+        return was_tight_before, False
+    spread = round(best_ask - best_bid, 4)
+    is_tight = spread <= SPREAD_TIGHT_THRESHOLD
+    just_tightened = is_tight and not was_tight_before
+    return is_tight, just_tightened, spread
 
 
 def _extract_poll_context(current_round, topic):
@@ -427,12 +509,24 @@ def poll_loop(market_id, current_round, topic):
     next_refresh_at = round_end_at - REFRESH_MARGIN_SECONDS
     last_snapshot_ts = None
     stale_repeats = 0
+    spread_is_tight = False
+
+    recent_outcomes = load_recent_outcomes()
+    signal = check_streak_signal(recent_outcomes)
+    if signal:
+        send_notification(
+            f"Racha de {signal['streak_len']}x {signal['streak_direction']} -- considerar {signal['suggested_side']}",
+            f"Historico: {signal['historical_stats']}. NO confirmado en vivo, no incluye price impact. Decision tuya.",
+        )
 
     while True:
         try:
             if time.time() >= next_refresh_at:
                 print("\n[rollover] fin de ronda esperado -- resolviendo resultado de la ronda anterior...")
-                log_round_outcome(market_id, round_start_ms)
+                outcome = log_round_outcome(market_id, round_start_ms)
+                if outcome in ("Up", "Down"):
+                    recent_outcomes.append(outcome)
+                    recent_outcomes = recent_outcomes[-10:]
 
                 print("[rollover] buscando la ronda actual de nuevo...")
                 new_market_id, new_round, new_topic = find_btc_5m_market()
@@ -444,15 +538,33 @@ def poll_loop(market_id, current_round, topic):
                 round_start_price = get_round_start_price(round_start_ms)
                 next_refresh_at = round_end_at - REFRESH_MARGIN_SECONDS
                 last_snapshot_ts, stale_repeats = None, 0
+                spread_is_tight = False
+
+                signal = check_streak_signal(recent_outcomes)
+                if signal:
+                    send_notification(
+                        f"Racha de {signal['streak_len']}x {signal['streak_direction']} -- considerar {signal['suggested_side']}",
+                        f"Historico: {signal['historical_stats']}. NO confirmado en vivo, no incluye price impact. Decision tuya.",
+                    )
 
             resp = get_order_book(market_id, vendor, token_id, condition_id)
             log_snapshot(market_id, resp, round_start_price)
             if resp.status_code == 200:
                 print(f"[snapshot] {resp.text[:300]}")
                 try:
-                    snapshot_ts = resp.json().get("timestamp")
+                    body = resp.json()
+                    snapshot_ts = body.get("timestamp")
+                    best_bid, best_ask = _best_bid_ask(body)
                 except ValueError:
-                    snapshot_ts = None
+                    snapshot_ts, best_bid, best_ask = None, None, None
+
+                spread_is_tight, just_tightened, spread = check_spread_alert(best_bid, best_ask, spread_is_tight)
+                if just_tightened:
+                    send_notification(
+                        "Spread angosto (buen momento de ejecucion)",
+                        f"spread={spread} en marketId={market_id}. Solo liquidez -- NO predice Up/Down.",
+                    )
+
                 if snapshot_ts is not None and snapshot_ts == last_snapshot_ts:
                     stale_repeats += 1
                     if stale_repeats >= STALE_REPEATS_BEFORE_FORCE_REFRESH:

@@ -326,6 +326,33 @@ Una vez que acumules suficientes horas/dias de datos con eso corriendo,
 comparteme ambos CSVs (o los primeros errores/respuestas crudas si algo
 no matchea) y sigo desde ahi.
 
+### Alertas en vivo (dos tipos, con distinto respaldo)
+
+El script manda notificaciones de telefono (via `termux-notification`,
+con fallback a consola si no esta instalado) de **dos tipos distintos**
+-- importa no mezclarlos, porque tienen niveles de evidencia muy
+diferentes:
+
+1. **Que lado considerar, al inicio de cada ronda** (`check_streak_signal`):
+   se activa cuando hubo una racha de 3 o 4 resultados iguales seguidos,
+   basado en `streak_reversion_3/4` del backtest historico (con la fee
+   real de 2% ya confirmada). Esto tiene respaldo estadistico
+   preliminar -- pero **no esta confirmado contra datos de order-book
+   en vivo todavia** (eso es justo lo que este logger esta juntando), y
+   el backtest no incluye price impact real. No es una garantia, es
+   informacion para tu propio criterio. Racha de 2 no dispara alerta a
+   proposito (pasa en ~50% de las rondas, seria puro ruido).
+2. **Spread angosto = buen momento de ejecucion** (`check_spread_alert`):
+   esto **no predice Up/Down para nada**. Ya investigamos con
+   `option_edge_analysis.py` si el timing dentro de la ronda agrega
+   señal direccional y la respuesta fue no -- el momentum del ultimo
+   minuto no aporta nada una vez que se conoce el gap de precio. Esta
+   alerta es solo sobre calidad de ejecucion (spread angosto = mas
+   barato entrar/salir ahora mismo), para *si ya decidiste* un lado, no
+   para decidir cual.
+
+Ninguna de las dos coloca ordenes -- son notificaciones, no acciones.
+
 ## Como correrlo vos mismo
 
 ```bash
