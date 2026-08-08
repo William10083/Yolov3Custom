@@ -52,6 +52,7 @@ import hashlib
 import hmac
 import json
 import os
+import statistics
 import time
 import urllib.parse
 
@@ -621,6 +622,85 @@ def _taker_buy_ratio_before(by_time, round_start_ms, minutes):
     return None if vol <= 0 else buy / vol
 
 
+# The candle-shape reads below mirror MarketContext in strategies.py exactly
+# -- same windows, same OPEN-price convention, same formulas. They have to,
+# or the win rates measured in the backtest would not describe what runs here.
+# Kline indices: 1 = open, 2 = high, 3 = low.
+
+
+def _window_before(by_time, round_start_ms, minutes):
+    return [
+        by_time[round_start_ms - m * 60_000]
+        for m in range(minutes, 0, -1)
+        if (round_start_ms - m * 60_000) in by_time
+    ]
+
+
+def _open_at(by_time, ms):
+    c = by_time.get(ms)
+    return float(c[1]) if c else None
+
+
+def _close_position_before(by_time, round_start_ms, minutes=5):
+    win = _window_before(by_time, round_start_ms, minutes)
+    end = _open_at(by_time, round_start_ms)
+    if not win or end is None:
+        return None
+    high = max(float(c[2]) for c in win)
+    low = min(float(c[3]) for c in win)
+    return None if high <= low else (end - low) / (high - low)
+
+
+def _path_efficiency_before(by_time, round_start_ms, minutes=5):
+    win = _window_before(by_time, round_start_ms, minutes)
+    end = _open_at(by_time, round_start_ms)
+    if len(win) < 2 or end is None:
+        return None
+    opens = [float(c[1]) for c in win] + [end]
+    net = abs(opens[-1] - opens[0])
+    travel = sum(abs(opens[i] - opens[i - 1]) for i in range(1, len(opens)))
+    return None if travel == 0 else net / travel
+
+
+def _consecutive_direction_before(by_time, round_start_ms, max_look=6):
+    opens = []
+    for m in range(max_look, -1, -1):
+        p = _open_at(by_time, round_start_ms - m * 60_000)
+        if p is None:
+            return None
+        opens.append(p)
+    moves = [opens[i] - opens[i - 1] for i in range(1, len(opens))]
+    if not moves or moves[-1] == 0:
+        return None
+    direction = 1 if moves[-1] > 0 else -1
+    count = 0
+    for mv in reversed(moves):
+        if (mv > 0 and direction == 1) or (mv < 0 and direction == -1):
+            count += 1
+        else:
+            break
+    return direction, count
+
+
+def _distance_from_mean_before(by_time, round_start_ms, minutes=20):
+    win = _window_before(by_time, round_start_ms, minutes)
+    end = _open_at(by_time, round_start_ms)
+    if len(win) < 5 or end is None:
+        return None
+    opens = [float(c[1]) for c in win]
+    sd = statistics.pstdev(opens)
+    return None if sd == 0 else (end - statistics.fmean(opens)) / sd
+
+
+def _range_pct_before(by_time, round_start_ms, minutes=5):
+    win = _window_before(by_time, round_start_ms, minutes)
+    if not win:
+        return None
+    high = max(float(c[2]) for c in win)
+    low = min(float(c[3]) for c in win)
+    return None if low <= 0 else (high - low) / low * 100
+
+
 # Every entry is a strategy that cleared breakeven in backtest.py's 180-day
 # run at the REAL 2% fee, with `q` set to the LOWER bound of its 95% CI --
 # never the midpoint, which would overstate the edge systematically.
@@ -629,16 +709,36 @@ def _taker_buy_ratio_before(by_time, round_start_ms, minutes):
 # earlier run, but in the corrected open-price backtest at 2% fee their CI
 # lower bound no longer clears breakeven, so betting them is not justified.
 _SIGNAL_SPECS = [
-    # (name, q, kind, params) -- q = CI95% lower bound, out-of-sample
+    # (name, q, kind, params) -- q = CI95% lower bound, out-of-sample, fee 2%
     ("micro_mean_reversion_3m", 0.522, "revert", {"minutes": 3, "min_move_pct": 0.05}),
     ("volume_imbalance_contrarian_15m", 0.519, "flow", {"minutes": 15, "threshold": 0.65}),
+    ("precio_estirado_2sd", 0.519, "stretched", {"minutes": 20, "min_z": 2.0}),
     ("volume_imbalance_contrarian_3m", 0.518, "flow", {"minutes": 3, "threshold": 0.65}),
     ("volume_imbalance_contrarian_5m", 0.518, "flow", {"minutes": 5, "threshold": 0.65}),
     ("micro_mean_reversion_1m", 0.517, "revert", {"minutes": 1, "min_move_pct": 0.05}),
+    ("movimiento_limpio", 0.516, "efficient", {"minutes": 5, "min_efficiency": 0.6, "min_move_pct": 0.05}),
+    ("precio_estirado_1sd", 0.516, "stretched", {"minutes": 20, "min_z": 1.0}),
+    ("cierre_en_extremo", 0.513, "close_pos", {"minutes": 5, "threshold": 0.8}),
+    ("rango_ancho", 0.513, "wide_range", {"minutes": 5, "min_range_pct": 0.15}),
     ("micro_mean_reversion_5m", 0.513, "revert", {"minutes": 5, "min_move_pct": 0.05}),
+    ("racha_velas_1m", 0.511, "candle_run", {"min_run": 3}),
     ("streak_reversion_3", 0.511, "streak", {"k": 3}),
     ("contrarian_last_1", 0.509, "streak", {"k": 1}),
 ]
+
+# Tested but NOT wired up, because the data said no:
+#   close_position_continuation  47.9% -- the "closing strong carries" read is
+#                                simply wrong here; its mirror wins instead
+#   choppy_move_reversion        51.3%, CI [48.5, 54.0] -- includes 50%
+#   last_minute_reversal_follow  50.3% -- no signal at all
+#   consecutive_candle_reversion_5  CI [49.0, 54.3] -- too few cases to trust
+#
+# Caveat that applies to the whole table: 77 strategies were tested, so at 95%
+# confidence a handful of passes are expected from chance alone. These variants
+# are also heavily correlated (all measure the same reversion effect the
+# variance-ratio test found), so this is nowhere near 77 independent tests.
+# The ones kept here have margin above breakeven rather than barely clearing it,
+# but the live accuracy counter -- not the backtest -- is what settles it.
 
 
 def collect_signals(recent_outcomes, by_time, round_start_ms):
@@ -674,6 +774,47 @@ def collect_signals(recent_outcomes, by_time, round_start_ms):
                     side, detail = "Down", f"{ratio*100:.0f}% del volumen fue compra agresiva ({params['minutes']}min)"
                 elif ratio <= 1 - params["threshold"]:
                     side, detail = "Up", f"{ratio*100:.0f}% del volumen fue compra agresiva ({params['minutes']}min)"
+
+        elif kind == "stretched":
+            z = _distance_from_mean_before(by_time, round_start_ms, params["minutes"])
+            if z is not None and abs(z) >= params["min_z"]:
+                side = "Down" if z > 0 else "Up"
+                detail = f"precio a {z:+.1f} desviaciones de su media de {params['minutes']}min"
+
+        elif kind == "efficient":
+            eff = _path_efficiency_before(by_time, round_start_ms, params["minutes"])
+            pct = _pct_move_before(by_time, round_start_ms, params["minutes"])
+            if (
+                eff is not None
+                and pct is not None
+                and eff >= params["min_efficiency"]
+                and abs(pct) >= params["min_move_pct"]
+            ):
+                side = "Down" if pct > 0 else "Up"
+                detail = f"movimiento limpio de {pct:+.3f}% (eficiencia {eff:.0%}) en {params['minutes']}min"
+
+        elif kind == "close_pos":
+            pos = _close_position_before(by_time, round_start_ms, params["minutes"])
+            if pos is not None:
+                if pos >= params["threshold"]:
+                    side, detail = "Down", f"cerro en el {pos:.0%} superior de su rango"
+                elif pos <= 1 - params["threshold"]:
+                    side, detail = "Up", f"cerro en el {1-pos:.0%} inferior de su rango"
+
+        elif kind == "wide_range":
+            rng = _range_pct_before(by_time, round_start_ms, params["minutes"])
+            pct = _pct_move_before(by_time, round_start_ms, params["minutes"])
+            if rng is not None and pct is not None and rng >= params["min_range_pct"] and pct != 0:
+                side = "Down" if pct > 0 else "Up"
+                detail = f"rango ancho {rng:.2f}% con movimiento {pct:+.3f}%"
+
+        elif kind == "candle_run":
+            res = _consecutive_direction_before(by_time, round_start_ms)
+            if res is not None:
+                direction, count = res
+                if count >= params["min_run"]:
+                    side = "Down" if direction == 1 else "Up"
+                    detail = f"{count} velas de 1min seguidas {'subiendo' if direction == 1 else 'bajando'}"
 
         if side:
             fired.append({"name": name, "q": q, "side": side, "detail": detail})

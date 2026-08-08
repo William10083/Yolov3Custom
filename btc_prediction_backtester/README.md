@@ -357,27 +357,70 @@ tienen niveles de evidencia muy diferentes:
 Igual que con las credenciales de Binance: **nunca pegues el token de
 Telegram en el chat** -- solo en tu terminal.
 
-0. **Las 8 señales que se evaluan** (`collect_signals`): no es solo
+0. **Las 14 señales que se evaluan** (`collect_signals`): no es solo
    "rachas". Cada ronda se evalua contra las estrategias que superaron
    breakeven en el backtest de 180 dias con la fee real de 2%, cada una
    con su `q` = **limite inferior** de su IC95% out-of-sample:
 
    | Estrategia | q | Que mira | Dispara en |
    |---|---|---|---|
-   | `micro_mean_reversion_3m` | 52.2% | movimiento de BTC en los 3min previos | 61% de rondas |
+   | `micro_mean_reversion_3m` | 52.2% | movimiento de BTC en los 3min previos | 61% |
    | `volume_imbalance_contrarian_15m` | 51.9% | % de volumen que fue compra agresiva | 18% |
-   | `volume_imbalance_contrarian_3m` | 51.8% | idem, ventana 3min | 35% |
-   | `volume_imbalance_contrarian_5m` | 51.8% | idem, ventana 5min | 28% |
+   | `precio_estirado_2sd` | 51.9% | precio a 2+ desviaciones de su media de 20min | 17% |
+   | `volume_imbalance_contrarian_3m` | 51.8% | flujo de ordenes, ventana 3min | 35% |
+   | `volume_imbalance_contrarian_5m` | 51.8% | flujo de ordenes, ventana 5min | 29% |
    | `micro_mean_reversion_1m` | 51.7% | movimiento en 1min previo | 40% |
-   | `micro_mean_reversion_5m` | 51.3% | movimiento en 5min previos | 68% |
+   | `movimiento_limpio` | 51.6% | movimiento directo, sin rebotes (eficiencia >60%) | 30% |
+   | `precio_estirado_1sd` | 51.6% | precio a 1+ desviacion de su media | 55% |
+   | `cierre_en_extremo` | 51.3% | la ronda cerro pegada al techo/piso de su rango | 51% |
+   | `rango_ancho` | 51.3% | ronda de rango inusualmente ancho | 65% |
+   | `micro_mean_reversion_5m` | 51.3% | movimiento en 5min previos | 67% |
+   | `racha_velas_1m` | 51.1% | 3+ velas de 1min seguidas en la misma direccion | 23% |
    | `streak_reversion_3` | 51.1% | 3 rondas iguales seguidas | ~12% |
    | `contrarian_last_1` | 50.9% | resultado de la ronda anterior | ~100% |
 
-   Las de `micro_mean_reversion` y `volume_imbalance` usan **datos de
-   precio y flujo de ordenes previos a la ronda** -- informacion que la
-   app no muestra en ningun lado, a diferencia del porcentaje Up/Down.
-   Con las 8 conectadas, solo el **7.6%** de las rondas se queda sin
-   ninguna señal activa (antes, con solo rachas, era ~88%).
+   Casi todas usan **precio, forma de vela y flujo de ordenes previos a la
+   ronda** -- informacion que la app no muestra en ningun lado, a
+   diferencia del porcentaje Up/Down. Solo el **2.7%** de las rondas se
+   queda sin ninguna señal activa (antes, con solo rachas, era ~88%).
+
+   ### Los factores que se probaron y NO funcionaron
+
+   Se agregaron 18 features "de trader" y se midieron todos antes de
+   conectar ninguno. **6 fallaron y quedaron afuera:**
+
+   | Factor | Resultado | Lectura |
+   |---|---|---|
+   | `close_position_continuation` | **47.9%** | La idea de "cerrar fuerte se sostiene" es directamente falsa aca; gana su espejo |
+   | `choppy_move_reversion` | 51.3%, IC [48.5, 54.0] | Incluye 50%, no distinguible de azar |
+   | `last_minute_reversal_follow` | 50.3% | Sin señal, el giro de ultimo minuto no dice nada |
+   | `consecutive_candle_reversion_5` | IC [49.0, 54.3] | Demasiado pocos casos para confiar |
+
+   Se probaron **variantes opuestas del mismo hecho a proposito**. Si solo
+   se prueba la version que uno espera que funcione, un resultado positivo
+   puede ser azar. Dos casos:
+
+   - `close_position_reversion` (52.1%) vs `continuation` (47.9%): son
+     complementarios exactos, asi que suman 100% por construccion. Lo
+     informativo es de que lado del 50% cayo la reversion.
+   - `movimiento_limpio` (52.8%) vs `choppy` (51.3%, no significativo):
+     estos **no** son complementarios -- disparan en condiciones
+     distintas. Esa comparacion si informa: los movimientos limpios
+     revierten de forma confiable, los que llegan rebotando no.
+
+   ⚠️ **Caveat de comparaciones multiples:** se probaron 77 estrategias.
+   Con 95% de confianza, unas 4 pasarian por puro azar. Ademas estas
+   variantes estan muy correlacionadas entre si (todas miden el mismo
+   efecto de reversion que detecto el variance-ratio test), asi que
+   **no** son 77 tests independientes. Se conectaron las que tienen
+   margen sobre breakeven, no las que apenas lo rozan -- pero quien
+   decide de verdad es el contador de aciertos en vivo, no el backtest.
+
+   Los calculos del alertador en vivo se verificaron contra los del
+   backtest sobre 3000 rondas historicas: **0 discrepancias** en las 7
+   funciones (close_position, path_efficiency, distance_from_mean,
+   range_pct, consecutive_direction, pct_move, taker_buy_ratio). Si
+   difirieran, las tasas medidas no describirian lo que corre en vivo.
 
    **Se usa la señal mas fuerte, nunca una mezcla.** Combinar señales
    correlacionadas en un solo numero seria inventar una probabilidad que

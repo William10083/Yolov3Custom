@@ -71,6 +71,96 @@ class MarketContext:
             return None
         return statistics.pstdev(rets)
 
+    # --- what a trader actually eyeballs on the previous round's candle ---
+
+    def close_position(self, ref_ms, minutes=5):
+        """Where the last `minutes` closed inside their own high-low range,
+        as 0..1 (0 = closed at the very low, 1 = at the very high).
+
+        Closing pinned at an extreme is the classic "ran out of buyers"
+        read; closing mid-range says the move had no conviction either way.
+        """
+        win = self.window(ref_ms, minutes)
+        if not win:
+            return None
+        high = max(c["high"] for c in win)
+        low = min(c["low"] for c in win)
+        end = self.close_minutes_before(ref_ms, 0)
+        if end is None or high <= low:
+            return None
+        return (end - low) / (high - low)
+
+    def path_efficiency(self, ref_ms, minutes=5):
+        """|net move| / (sum of per-minute absolute moves), 0..1.
+
+        Near 1 means a clean directional push; near 0 means the price
+        thrashed back and forth and ended up nowhere. Same net move means
+        something very different depending on which of these it was.
+        """
+        win = self.window(ref_ms, minutes)
+        if len(win) < 2:
+            return None
+        opens = [c["open"] for c in win] + [self.close_minutes_before(ref_ms, 0)]
+        if opens[-1] is None:
+            return None
+        net = abs(opens[-1] - opens[0])
+        travel = sum(abs(opens[i] - opens[i - 1]) for i in range(1, len(opens)))
+        return None if travel == 0 else net / travel
+
+    def last_minute_reversal(self, ref_ms, minutes=5):
+        """True when the final minute moved against the whole window's net
+        direction -- a late turn right at the boundary."""
+        net = self.pct_move(ref_ms, minutes)
+        last = self.pct_move(ref_ms, 1)
+        if net is None or last is None or net == 0 or last == 0:
+            return None
+        return (net > 0) != (last > 0)
+
+    def range_pct(self, ref_ms, minutes=5):
+        """High-low range of the last `minutes`, as % of price -- the plain
+        'how wild was it' measure."""
+        win = self.window(ref_ms, minutes)
+        if not win:
+            return None
+        high = max(c["high"] for c in win)
+        low = min(c["low"] for c in win)
+        return None if low <= 0 else (high - low) / low * 100
+
+    def consecutive_direction(self, ref_ms, max_look=6):
+        """(direction, count) of the run of same-direction 1-minute candles
+        ending right before ref_ms. direction is +1 up, -1 down."""
+        opens = []
+        for m in range(max_look, -1, -1):
+            p = self.close_minutes_before(ref_ms, m)
+            if p is None:
+                return None
+            opens.append(p)
+        moves = [opens[i] - opens[i - 1] for i in range(1, len(opens))]
+        if not moves or moves[-1] == 0:
+            return None
+        direction = 1 if moves[-1] > 0 else -1
+        count = 0
+        for mv in reversed(moves):
+            if (mv > 0 and direction == 1) or (mv < 0 and direction == -1):
+                count += 1
+            else:
+                break
+        return direction, count
+
+    def distance_from_mean(self, ref_ms, minutes=20):
+        """How far price sits from its own recent average, in units of that
+        window's stdev -- a z-score of 'stretched vs normal'."""
+        win = self.window(ref_ms, minutes)
+        if len(win) < 5:
+            return None
+        opens = [c["open"] for c in win]
+        end = self.close_minutes_before(ref_ms, 0)
+        if end is None:
+            return None
+        mean = statistics.fmean(opens)
+        sd = statistics.pstdev(opens)
+        return None if sd == 0 else (end - mean) / sd
+
 
 def random_baseline(history, ctx, start_ms):
     import random
@@ -201,6 +291,141 @@ def volume_imbalance_contrarian(minutes, threshold):
     return strategy
 
 
+def close_position_reversion(threshold, minutes=5):
+    """Fade a round that closed pinned near one end of its own range.
+
+    Trader's read: a close jammed against the high means the push spent
+    itself getting there. Only fires at the extremes -- a mid-range close
+    carries no information worth acting on.
+    """
+
+    def strategy(history, ctx, start_ms):
+        pos = ctx.close_position(start_ms, minutes)
+        if pos is None:
+            return None
+        if pos >= threshold:
+            return "Down"
+        if pos <= 1 - threshold:
+            return "Up"
+        return None
+
+    strategy.__name__ = f"close_position_reversion_{minutes}m_t{threshold}"
+    return strategy
+
+
+def close_position_continuation(threshold, minutes=5):
+    """The opposite read of the same fact: closing on the high is strength
+    that carries. Included so the data decides which story is true."""
+
+    def strategy(history, ctx, start_ms):
+        pos = ctx.close_position(start_ms, minutes)
+        if pos is None:
+            return None
+        if pos >= threshold:
+            return "Up"
+        if pos <= 1 - threshold:
+            return "Down"
+        return None
+
+    strategy.__name__ = f"close_position_continuation_{minutes}m_t{threshold}"
+    return strategy
+
+
+def efficient_move_reversion(min_efficiency, min_move_pct, minutes=5):
+    """Fade only CLEAN directional moves -- high path efficiency plus real
+    size. Filters out the chop that a plain move-size rule would catch."""
+
+    def strategy(history, ctx, start_ms):
+        eff = ctx.path_efficiency(start_ms, minutes)
+        pct = ctx.pct_move(start_ms, minutes)
+        if eff is None or pct is None:
+            return None
+        if eff < min_efficiency or abs(pct) < min_move_pct:
+            return None
+        return "Down" if pct > 0 else "Up"
+
+    strategy.__name__ = f"efficient_move_reversion_{minutes}m_e{min_efficiency}_m{min_move_pct}"
+    return strategy
+
+
+def choppy_move_reversion(max_efficiency, min_move_pct, minutes=5):
+    """Mirror of the above: fade moves that got there by thrashing. If
+    reversion is really about exhaustion, chop should revert harder."""
+
+    def strategy(history, ctx, start_ms):
+        eff = ctx.path_efficiency(start_ms, minutes)
+        pct = ctx.pct_move(start_ms, minutes)
+        if eff is None or pct is None:
+            return None
+        if eff > max_efficiency or abs(pct) < min_move_pct:
+            return None
+        return "Down" if pct > 0 else "Up"
+
+    strategy.__name__ = f"choppy_move_reversion_{minutes}m_e{max_efficiency}_m{min_move_pct}"
+    return strategy
+
+
+def last_minute_reversal_follow(minutes=5):
+    """When the final minute turned against the round's net direction, bet
+    that the turn is the real signal and carries into the next round."""
+
+    def strategy(history, ctx, start_ms):
+        reversed_late = ctx.last_minute_reversal(start_ms, minutes)
+        last = ctx.pct_move(start_ms, 1)
+        if not reversed_late or last is None:
+            return None
+        return "Up" if last > 0 else "Down"
+
+    strategy.__name__ = f"last_minute_reversal_follow_{minutes}m"
+    return strategy
+
+
+def consecutive_candle_reversion(min_run):
+    """Fade a run of `min_run`+ same-direction 1-minute candles -- the
+    minute-level analogue of the round-level streak signal."""
+
+    def strategy(history, ctx, start_ms):
+        res = ctx.consecutive_direction(start_ms)
+        if res is None:
+            return None
+        direction, count = res
+        if count < min_run:
+            return None
+        return "Down" if direction == 1 else "Up"
+
+    strategy.__name__ = f"consecutive_candle_reversion_{min_run}"
+    return strategy
+
+
+def stretched_from_mean_reversion(min_z, minutes=20):
+    """Fade price that has stretched `min_z` stdevs from its own recent
+    average -- the textbook overextension entry."""
+
+    def strategy(history, ctx, start_ms):
+        z = ctx.distance_from_mean(start_ms, minutes)
+        if z is None or abs(z) < min_z:
+            return None
+        return "Down" if z > 0 else "Up"
+
+    strategy.__name__ = f"stretched_from_mean_reversion_{minutes}m_z{min_z}"
+    return strategy
+
+
+def wide_range_reversion(min_range_pct, minutes=5):
+    """Fade the direction only after an unusually WIDE round -- volatility
+    expansion as the trigger rather than the move itself."""
+
+    def strategy(history, ctx, start_ms):
+        rng = ctx.range_pct(start_ms, minutes)
+        pct = ctx.pct_move(start_ms, minutes)
+        if rng is None or pct is None or rng < min_range_pct or pct == 0:
+            return None
+        return "Down" if pct > 0 else "Up"
+
+    strategy.__name__ = f"wide_range_reversion_{minutes}m_r{min_range_pct}"
+    return strategy
+
+
 class _RunningMedian:
     """Two-heap running median: O(log n) insert, O(1) query."""
 
@@ -283,4 +508,23 @@ def build_default_strategies():
     strategies.append(vol_regime_gated(momentum_last_n(1), 5, 30, "low"))
     strategies.append(vol_regime_gated(micro_mean_reversion(5), 5, 30, "high"))
     strategies.append(vol_regime_gated(micro_momentum(5), 5, 30, "low"))
+
+    # Candle-shape / path-quality reads -- the things a trader eyeballs on the
+    # previous round rather than just its net direction. Reversion AND
+    # continuation variants of the same fact are both included so the data
+    # decides which story holds, instead of only testing the one we expect.
+    for t in (0.8, 0.9):
+        strategies.append(close_position_reversion(t))
+        strategies.append(close_position_continuation(t))
+    for eff in (0.6, 0.75):
+        strategies.append(efficient_move_reversion(eff, 0.05))
+    for eff in (0.3, 0.45):
+        strategies.append(choppy_move_reversion(eff, 0.05))
+    strategies.append(last_minute_reversal_follow())
+    for run in (3, 4, 5):
+        strategies.append(consecutive_candle_reversion(run))
+    for z in (1.0, 1.5, 2.0):
+        strategies.append(stretched_from_mean_reversion(z))
+    for r in (0.1, 0.15, 0.2):
+        strategies.append(wide_range_reversion(r))
     return strategies
