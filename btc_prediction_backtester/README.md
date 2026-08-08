@@ -357,31 +357,53 @@ tienen niveles de evidencia muy diferentes:
 Igual que con las credenciales de Binance: **nunca pegues el token de
 Telegram en el chat** -- solo en tu terminal.
 
-1. **Prediccion con razon, al inicio de cada ronda** (`build_prediction`):
-   combina la cuota que el propio mercado ya esta mostrando (puesta por
-   creadores de mercado profesionales -- la mejor estimacion disponible,
-   no ventaja nuestra) con la señal de racha si esta activa
-   (`check_streak_signal`, se activa con 3 o 4 resultados iguales
-   seguidos, basado en `streak_reversion_3/4` del backtest historico con
-   la fee real de 2%). El mensaje dice explicitamente si la señal
-   coincide o no con lo que el mercado esta pricing, y da un rango
-   aproximado de cierre calculado con la volatilidad historica real (NO
-   un precio exacto). Racha de 2 no dispara señal propia a proposito
-   (pasa en ~50% de las rondas, seria puro ruido) -- en esos casos la
-   prediccion es simplemente "lo que dice el mercado".
+1. **Alerta de VALOR** (`compute_bet_edge`): el analisis de verdad. Decir
+   "apostar Up porque el mercado marca 72% Up" no es analisis, es repetir
+   la pantalla -- pagas 0.72 por algo que vale ~0.72, ventaja cero. La
+   ventaja solo existe cuando **el precio que cobra el mercado esta por
+   debajo de nuestra probabilidad estimada**. Comprar una accion a precio
+   `p` paga $1 si acertas, asi que con probabilidad estimada `q` y fee
+   `f`:
+
+   ```
+   EV por cada $1 apostado = q * (1 - f) / p - 1     (positivo solo si p < q * (1-f))
+   ```
+
+   Con la fee real de 2% y una racha de 3 (`q` = 52.0%, el **limite
+   inferior** del IC95% del backtest, no el punto medio -- usar el punto
+   medio sobreestimaria la ventaja sistematicamente), solo vale la pena
+   pagar **por debajo de 0.51**. Ejemplos reales corridos contra precios
+   observados:
+
+   | Situacion | Precio | EV | Alerta |
+   |---|---|---|---|
+   | Sin racha activa | -- | -- | silencio |
+   | Racha, pero el mercado cobra 0.72 | 0.72 | -29% | silencio |
+   | Racha, mercado parejo | 0.51 | -0.1% | silencio |
+   | Racha 4x Up, Down se consigue a 0.29 | 0.29 | +72% | **ALERTA** |
+
+   O sea: la mayoria de las rondas **no dispara nada**, que es la
+   respuesta honesta y coincide con el pedido original de "solo cuando la
+   apuesta es muy segura".
+
+   **Limite importante:** el backtest midio apostar reversion **al inicio**
+   de la ronda. Una vez que BTC ya se movio dentro de la ronda, ese ~53%
+   deja de aplicar: un lado barato a mitad de ronda suele estar barato
+   porque va perdiendo de verdad, y comprarlo seria la peor apuesta
+   disponible, no la mejor. Por eso la ventaja **solo se evalua en los
+   primeros 45 segundos** (`MAX_SECONDS_INTO_ROUND_TO_BET`), mientras la
+   premisa del backtest todavia se sostiene.
+
 2. **Resultado de cada ronda, cuando resuelve** (`log_round_outcome`):
    compara la prediccion contra el resultado real y manda ACERTO/FALLO,
    mas la precision acumulada de las ultimas 50 predicciones evaluadas
    (`compute_running_accuracy`). Esto es honesto y verificable -- vas a
    ver en vivo si el ~53% del backtest se sostiene o no.
-3. **Spread angosto = buen momento de ejecucion** (`check_spread_alert`):
-   esto **no predice Up/Down para nada**. Ya investigamos con
-   `option_edge_analysis.py` si el timing dentro de la ronda agrega
-   señal direccional y la respuesta fue no -- el momentum del ultimo
-   minuto no aporta nada una vez que se conoce el gap de precio. Esta
-   alerta es solo sobre calidad de ejecucion (spread angosto = mas
-   barato entrar/salir ahora mismo), para *si ya decidiste* un lado, no
-   para decidir cual.
+
+Se elimino la alerta de "spread angosto" que existia antes: disparaba
+constantemente, no predecia nada, y ensuciaba el canal. El spread igual
+esta contemplado donde importa -- el precio que usa el calculo de EV es
+el `ask` real del libro (lo que de verdad pagarias), no el punto medio.
 
 **Importante:** esto no es un sistema que "aprende" ni se auto-ajusta.
 Con la poca muestra que este script puede juntar en la practica (decenas

@@ -555,61 +555,69 @@ def _market_prob_up(current_round):
     return None
 
 
-def build_prediction(current_round, streak_signal, round_start_price):
-    """Combines what we actually have evidence for: the market's own live
-    price (set by real market makers -- the single best available
-    estimate) plus our streak signal when one is active. NOT a claim of
-    certainty at any point -- see check_streak_signal()'s docstring."""
-    market_prob_up = _market_prob_up(current_round)
-    market_side = None
-    if market_prob_up is not None and market_prob_up != 0.5:
-        market_side = "Up" if market_prob_up > 0.5 else "Down"
-    market_desc = f"{market_prob_up*100:.0f}% Up / {(1-market_prob_up)*100:.0f}% Down" if market_prob_up is not None else "sin dato"
+# Conservative win-rate estimate per streak length: the LOWER bound of the
+# backtest's 95% CI, not the point estimate. Using the point estimate would
+# systematically overstate the edge -- if the true rate sits at the bottom of
+# the interval, every bet sized off the midpoint is a losing bet.
+_STREAK_WIN_PROB_CONSERVATIVE = {3: 0.520, 4: 0.510}
 
-    if streak_signal:
-        predicted_side = streak_signal["suggested_side"]
-        agreement = "coincide" if predicted_side == market_side else "NO coincide"
-        reasoning = (
-            f"racha de {streak_signal['streak_len']}x {streak_signal['streak_direction']} "
-            f"(historico {streak_signal['historical_stats']}); cuota del mercado: {market_desc} -- "
-            f"la señal {agreement} con lo que el mercado esta pricing"
-        )
-    else:
-        predicted_side = market_side
-        reasoning = (
-            f"sin racha activa -- vamos con la cuota del mercado ({market_desc}), "
-            f"que no es ventaja nuestra, es la mejor estimacion disponible (creadores de mercado reales)"
-        )
+MIN_EV_TO_ALERT = 0.02  # below this the "edge" is inside our own error bars
 
-    range_text = ""
-    if round_start_price:
-        one_sigma = round_start_price * ROUND_SIGMA_5MIN_PCT / 100
-        lo68, hi68 = round_start_price - one_sigma, round_start_price + one_sigma
-        lo90, hi90 = round_start_price - 1.645 * one_sigma, round_start_price + 1.645 * one_sigma
-        range_text = (
-            f"\nRango aprox. de cierre (volatilidad historica, NO una prediccion exacta de precio): "
-            f"68% ${lo68:,.0f}-${hi68:,.0f} | 90% ${lo90:,.0f}-${hi90:,.0f}"
-        )
-
-    return predicted_side, reasoning, range_text, market_prob_up
+# The backtest measured betting reversion AT THE ROUND'S START. Once BTC has
+# moved inside the round, that unconditional win rate no longer applies: a side
+# trading cheap late in a round is usually cheap because it is genuinely losing,
+# and buying it would be the worst bet available, not the best one. So the edge
+# is only evaluated in the opening seconds, while the premise still holds.
+MAX_SECONDS_INTO_ROUND_TO_BET = 45
 
 
-SPREAD_TIGHT_THRESHOLD = 0.03  # arbitrary, adjustable -- not derived from any backtest
+def compute_bet_edge(streak_signal, best_bid, best_ask, fee_rate, seconds_into_round=0):
+    """The actual analysis: is the market's price CHEAP relative to our
+    estimated probability?
+
+    Direction alone is worthless here -- betting "Up" because the market
+    says 72% Up means paying 0.72 for something worth ~0.72. Edge exists
+    only when we can buy a side for less than our own probability estimate.
+
+    Buying a share at price p pays $1 if right, so for estimated win
+    probability q and fee f:
+        EV per $1 staked = q * (1 - f) / p - 1
+    which is positive only when p < q * (1 - f).
+
+    In a binary market, buying Down is economically selling Up, so Down's
+    ask is approximately 1 - (best bid on Up). We only poll the Up book,
+    which is why Down's price is derived rather than read directly.
+    """
+    if streak_signal is None or best_bid is None or best_ask is None:
+        return None
+    if seconds_into_round > MAX_SECONDS_INTO_ROUND_TO_BET:
+        return None
+
+    side = streak_signal["suggested_side"]
+    q = _STREAK_WIN_PROB_CONSERVATIVE[streak_signal["streak_len"]]
+    price = best_ask if side == "Up" else round(1 - best_bid, 4)
+    if not 0 < price < 1:
+        return None
+
+    ev = q * (1 - fee_rate) / price - 1
+    return {
+        "side": side,
+        "price": price,
+        "q": q,
+        "ev": ev,
+        "max_price_worth_paying": round(q * (1 - fee_rate), 4),
+        "worth_it": ev >= MIN_EV_TO_ALERT,
+    }
 
 
-def check_spread_alert(best_bid, best_ask, was_tight_before):
-    """Liquidity/execution-quality signal ONLY -- does NOT predict Up/Down.
-    option_edge_analysis.py found no exploitable directional signal from
-    within-round timing once the price gap is known, so this deliberately
-    doesn't claim to predict anything: it only flags when the spread is
-    tight (cheap to enter/exit right now) vs wide (expensive), for if you
-    already decided a side and want a reasonable moment to execute."""
-    if best_bid is None or best_ask is None:
-        return was_tight_before, False
-    spread = round(best_ask - best_bid, 4)
-    is_tight = spread <= SPREAD_TIGHT_THRESHOLD
-    just_tightened = is_tight and not was_tight_before
-    return is_tight, just_tightened, spread
+def format_closing_range(round_start_price):
+    if not round_start_price:
+        return ""
+    one_sigma = round_start_price * ROUND_SIGMA_5MIN_PCT / 100
+    return (
+        f"Cierre probable: ${round_start_price - one_sigma:,.0f}-${round_start_price + one_sigma:,.0f} (68%) | "
+        f"${round_start_price - 1.645 * one_sigma:,.0f}-${round_start_price + 1.645 * one_sigma:,.0f} (90%)"
+    )
 
 
 def _extract_poll_context(current_round, topic):
@@ -651,22 +659,19 @@ def poll_loop(market_id, current_round, topic):
     next_refresh_at = round_end_at - REFRESH_MARGIN_SECONDS
     last_snapshot_ts = None
     stale_repeats = 0
-    spread_is_tight = False
 
+    fee_rate = (topic.get("feeRateBps") or 200) / 10000
     recent_outcomes = load_recent_outcomes()
     signal = check_streak_signal(recent_outcomes)
-    predicted_side, reasoning, range_text, market_prob_up = build_prediction(current_round, signal, round_start_price)
-    if predicted_side:
-        send_notification(
-            f"Ronda {market_id}: prediccion {predicted_side}",
-            f"Razon: {reasoning}{range_text}\n\n(Historico, no garantia -- ver README)",
-        )
+    market_prob_up = _market_prob_up(current_round)
+    alerted_this_round = False
+    bet_side = bet_reasoning = None
 
     while True:
         try:
             if time.time() >= next_refresh_at:
                 print("\n[rollover] fin de ronda esperado -- resolviendo resultado de la ronda anterior...")
-                outcome = log_round_outcome(market_id, round_start_ms, market_prob_up, predicted_side, reasoning)
+                outcome = log_round_outcome(market_id, round_start_ms, market_prob_up, bet_side, bet_reasoning)
                 if outcome in ("Up", "Down"):
                     recent_outcomes.append(outcome)
                     recent_outcomes = recent_outcomes[-10:]
@@ -676,22 +681,19 @@ def poll_loop(market_id, current_round, topic):
                 if new_market_id is not None:
                     market_id, current_round, topic = new_market_id, new_round, new_topic
                     vendor, condition_id, token_id = _extract_poll_context(current_round, topic)
+                    fee_rate = (topic.get("feeRateBps") or 200) / 10000
                 round_end_at = next_round_boundary()
                 round_start_ms = (round_end_at - ROUND_SECONDS) * 1000
                 round_start_price = get_round_start_price(round_start_ms)
                 next_refresh_at = round_end_at - REFRESH_MARGIN_SECONDS
                 last_snapshot_ts, stale_repeats = None, 0
-                spread_is_tight = False
 
                 signal = check_streak_signal(recent_outcomes)
-                predicted_side, reasoning, range_text, market_prob_up = build_prediction(
-                    current_round, signal, round_start_price
-                )
-                if predicted_side:
-                    send_notification(
-                        f"Ronda {market_id}: prediccion {predicted_side}",
-                        f"Razon: {reasoning}{range_text}\n\n(Historico, no garantia -- ver README)",
-                    )
+                market_prob_up = _market_prob_up(current_round)
+                alerted_this_round = False
+                bet_side = bet_reasoning = None
+                if signal is None:
+                    print(f"[sin señal] ultimas rondas: {' '.join(recent_outcomes[-4:])} -- sin racha, no se apuesta")
 
             resp = get_order_book(market_id, vendor, token_id, condition_id)
             log_snapshot(market_id, resp, round_start_price)
@@ -704,11 +706,29 @@ def poll_loop(market_id, current_round, topic):
                 except ValueError:
                     snapshot_ts, best_bid, best_ask = None, None, None
 
-                spread_is_tight, just_tightened, spread = check_spread_alert(best_bid, best_ask, spread_is_tight)
-                if just_tightened:
+                seconds_into_round = time.time() - (round_start_ms / 1000)
+                edge = compute_bet_edge(signal, best_bid, best_ask, fee_rate, seconds_into_round)
+                if edge:
+                    print(
+                        f"[edge] {edge['side']} a {edge['price']} | tope que vale pagar: "
+                        f"{edge['max_price_worth_paying']} | EV {edge['ev']*100:+.1f}%"
+                    )
+                if edge and edge["worth_it"] and not alerted_this_round:
+                    alerted_this_round = True
+                    bet_side = edge["side"]
+                    bet_reasoning = (
+                        f"racha {signal['streak_len']}x {signal['streak_direction']}; "
+                        f"{edge['side']} a {edge['price']} (tope {edge['max_price_worth_paying']}); EV {edge['ev']*100:+.1f}%"
+                    )
                     send_notification(
-                        "Spread angosto (buen momento de ejecucion)",
-                        f"spread={spread} en marketId={market_id}. Solo liquidez -- NO predice Up/Down.",
+                        f"VALOR: {edge['side']} a {edge['price']}",
+                        f"Racha de {signal['streak_len']}x {signal['streak_direction']} -> senal historica "
+                        f"{edge['q']*100:.1f}% {edge['side']} (limite inferior IC95%, conservador)\n"
+                        f"El mercado lo vende a {edge['price']}; solo vale la pena por debajo de "
+                        f"{edge['max_price_worth_paying']} (ya descontada la fee de {fee_rate*100:.1f}%)\n"
+                        f"Ventaja estimada: {edge['ev']*100:+.1f}% -- NO incluye price impact, que puede comerselo\n"
+                        f"{format_closing_range(round_start_price)}\n"
+                        f"{compute_running_accuracy()}",
                     )
 
                 if snapshot_ts is not None and snapshot_ts == last_snapshot_ts:
