@@ -81,6 +81,44 @@ identico, y vale aclararlo en vez de asumirlo.
   ese momento (mediana corriente con dos heaps, O(log n), sigue siendo
   walk-forward).
 
+## ¿Conviene entrar mas tarde en la ronda? (`intraround_entry_analysis.py`)
+
+Pregunta razonable: el alertador solo mira los primeros 45 segundos. ¿No
+seria mejor seguir toda la curva y entrar en el mejor momento?
+
+Se midio directamente. En cada checkpoint de 1 minuto de las 51,839 rondas
+se calcula el valor justo de "Up" segun el movimiento hasta ese momento, y
+se compara contra lo que efectivamente paso. **28 desviaciones replican en
+ambas mitades del dataset** -- lo cual descarta el azar y parece un
+hallazgo enorme.
+
+No lo es. Replicar descarta el azar, pero no descarta que el modelo este
+mal, y esta mal. La forma de los errores lo delata:
+
+| Minuto | Valor justo | Up real | Error |
+|---|---|---|---|
+| 1 | 0.10 | 17.1% | +6.5pp (revierte) |
+| 1 | 0.40 | 36.0% | −4.6pp (continua) |
+| 1 | 0.60 | 64.2% | +4.9pp (continua) |
+| 1 | 0.90 | 81.2% | −8.2pp (revierte) |
+
+Errores de signo opuesto en los extremos y en el medio, antisimetricos
+alrededor de 0.5. Esa es la firma de una **distribucion mal especificada**,
+no de una ineficiencia. La curtosis del movimiento restante es de **20.8 a
+28.1** segun el minuto; una normal tiene 3.0. Con colas gordas y pico
+agudo, un modelo normal subestima cuanto se queda quieto el precio (parece
+continuacion en el medio) y subestima los saltos grandes (parece reversion
+en los extremos) -- exactamente lo medido.
+
+Los creadores de mercado cotizan con modelos que ya contemplan eso.
+Apostar estas "desviaciones" seria apostar a que comparten mi error de
+modelado, cosa que no hacen.
+
+**Conclusion: no hay mejor momento de entrada adentro de la ronda.** El
+unico punto donde el modelo normal resulta insesgado es 0.50 (error
+−0.1pp sobre 16,740 rondas), que es justo la banda donde el alertador ya
+se restringe.
+
 ## Calibracion del precio de mercado (`option_edge_analysis.py`)
 
 Dado que este es un mercado tipo opcion binaria (no una casa de apuestas
