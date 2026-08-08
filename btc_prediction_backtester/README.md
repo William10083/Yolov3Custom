@@ -301,8 +301,12 @@ variables de entorno en tu maquina. El script:
    parametros reales que el endpoint exige segun errores `-3026` en vivo)
    cada 5 segundos y loguea cada snapshot a `data/live_odds_log.csv` --
    **no coloca ninguna orden**. Cada fila trae, ademas del JSON crudo,
-   columnas ya parseadas (`best_bid`, `best_ask`, `mid_price`) para no
-   tener que reprocesar el texto despues.
+   columnas ya parseadas: `best_bid`, `best_ask`, `mid_price` (la cuota),
+   y tambien `btc_price`, `round_start_price`, `price_gap_usd` -- el mismo
+   "Precio actual -$X.XX" que se ve en la app, calculado con el ticker
+   publico de `data-api.binance.vision` (independiente de la API privada),
+   para poder comparar directamente cuota vs. gap de precio real en cada
+   momento sin tener que reconstruirlo despues.
 3. Cuando una ronda termina (alineado al limite real de 5 minutos, no a
    un timer relativo a cuando arranco el script), **resuelve el
    resultado Up/Down de esa ronda** usando el mismo metodo publico y ya

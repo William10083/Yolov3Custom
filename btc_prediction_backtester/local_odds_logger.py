@@ -247,6 +247,9 @@ def ensure_log_file():
                     "best_bid",
                     "best_ask",
                     "mid_price",
+                    "btc_price",
+                    "round_start_price",
+                    "price_gap_usd",
                     "raw_body",
                 ]
             )
@@ -261,7 +264,44 @@ def _best_bid_ask(order_book_json):
     return best_bid, best_ask
 
 
-def log_snapshot(market_id, resp):
+def get_live_btc_price():
+    """Current BTCUSDT price from the same public, unauthenticated mirror
+    used elsewhere in this project -- this is what lets us log the same
+    "Precio actual -$X.XX" gap the app shows, independent of Binance's
+    private API (and of whatever exact oracle price the app itself uses)."""
+    try:
+        resp = requests.get(
+            "https://data-api.binance.vision/api/v3/ticker/price",
+            params={"symbol": "BTCUSDT"},
+            timeout=10,
+        )
+        return float(resp.json()["price"])
+    except Exception as exc:
+        print(f"[price-error] {exc}")
+        return None
+
+
+def get_round_start_price(round_start_ms, retries=3, delay_seconds=2):
+    """Open price of the 1m candle at the round's start boundary -- same
+    field resolve_round_outcome() uses for the end boundary, just fetched
+    right away instead of waiting for the round to finish."""
+    for attempt in range(retries):
+        try:
+            resp = requests.get(
+                "https://data-api.binance.vision/api/v3/klines",
+                params={"symbol": "BTCUSDT", "interval": "1m", "startTime": round_start_ms, "limit": 1},
+                timeout=10,
+            )
+            candles = resp.json()
+            if isinstance(candles, list) and candles and candles[0][0] == round_start_ms:
+                return float(candles[0][1])
+        except Exception as exc:
+            print(f"[start-price-error] intento {attempt + 1}/{retries}: {exc}")
+        time.sleep(delay_seconds)
+    return None
+
+
+def log_snapshot(market_id, resp, round_start_price):
     api_ts = best_bid = best_ask = mid = None
     if resp.status_code == 200:
         try:
@@ -272,10 +312,26 @@ def log_snapshot(market_id, resp):
                 mid = round((best_bid + best_ask) / 2, 4)
         except (ValueError, KeyError, IndexError):
             pass
+
+    btc_price = get_live_btc_price()
+    price_gap_usd = round(btc_price - round_start_price, 2) if (btc_price is not None and round_start_price is not None) else None
+
     with open(LOG_FILE, "a", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(
-            [int(time.time() * 1000), market_id, resp.status_code, api_ts, best_bid, best_ask, mid, resp.text[:2000]]
+            [
+                int(time.time() * 1000),
+                market_id,
+                resp.status_code,
+                api_ts,
+                best_bid,
+                best_ask,
+                mid,
+                btc_price,
+                round_start_price,
+                price_gap_usd,
+                resp.text[:2000],
+            ]
         )
 
 
@@ -367,6 +423,7 @@ def poll_loop(market_id, current_round, topic):
     vendor, condition_id, token_id = _extract_poll_context(current_round, topic)
     round_end_at = next_round_boundary()
     round_start_ms = (round_end_at - ROUND_SECONDS) * 1000
+    round_start_price = get_round_start_price(round_start_ms)
     next_refresh_at = round_end_at - REFRESH_MARGIN_SECONDS
     last_snapshot_ts = None
     stale_repeats = 0
@@ -384,11 +441,12 @@ def poll_loop(market_id, current_round, topic):
                     vendor, condition_id, token_id = _extract_poll_context(current_round, topic)
                 round_end_at = next_round_boundary()
                 round_start_ms = (round_end_at - ROUND_SECONDS) * 1000
+                round_start_price = get_round_start_price(round_start_ms)
                 next_refresh_at = round_end_at - REFRESH_MARGIN_SECONDS
                 last_snapshot_ts, stale_repeats = None, 0
 
             resp = get_order_book(market_id, vendor, token_id, condition_id)
-            log_snapshot(market_id, resp)
+            log_snapshot(market_id, resp, round_start_price)
             if resp.status_code == 200:
                 print(f"[snapshot] {resp.text[:300]}")
                 try:
