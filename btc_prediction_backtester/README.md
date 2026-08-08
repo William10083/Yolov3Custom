@@ -328,10 +328,34 @@ no matchea) y sigo desde ahi.
 
 ### Alertas en vivo (dos tipos, con distinto respaldo)
 
-El script manda notificaciones de telefono (via `termux-notification`,
-con fallback a consola si no esta instalado) de **dos tipos distintos**
--- importa no mezclarlos, porque tienen niveles de evidencia muy
-diferentes:
+El script manda alertas por **tres canales independientes** (consola
+siempre, Telegram si lo configuras, `termux-notification` si esta
+instalado) de **dos tipos distintos** -- importa no mezclarlos, porque
+tienen niveles de evidencia muy diferentes:
+
+#### Configurar el bot de Telegram (opcional pero recomendado)
+
+1. En Telegram, habla con **@BotFather** -> `/newbot` -> segui las
+   instrucciones -> te da un **token** (algo como
+   `123456789:AAExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`).
+2. Mandale cualquier mensaje a tu bot nuevo (para que Telegram registre
+   la conversacion).
+3. Consegui tu `chat_id` corriendo esto (reemplaza el token):
+   ```bash
+   curl -s "https://api.telegram.org/bot<TU_TOKEN>/getUpdates" | grep -o '"chat":{"id":[0-9-]*'
+   ```
+   El numero que aparece despues de `"id":` es tu `chat_id`.
+4. Agrega ambos a tu archivo de credenciales:
+   ```bash
+   cat >> ~/.btc_env << 'EOF'
+   export TELEGRAM_BOT_TOKEN="tu_token"
+   export TELEGRAM_CHAT_ID="tu_chat_id"
+   EOF
+   source ~/.btc_env
+   ```
+
+Igual que con las credenciales de Binance: **nunca pegues el token de
+Telegram en el chat** -- solo en tu terminal.
 
 1. **Que lado considerar, al inicio de cada ronda** (`check_streak_signal`):
    se activa cuando hubo una racha de 3 o 4 resultados iguales seguidos,

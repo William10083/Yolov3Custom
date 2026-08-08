@@ -70,6 +70,14 @@ if not API_KEY or not API_SECRET:
         "antes de este script. Nunca las escribas directamente en el codigo."
     )
 
+# Optional -- alerts still print to console and try termux-notification
+# even without these. Set both to also get a Telegram message:
+#   export TELEGRAM_BOT_TOKEN="..."
+#   export TELEGRAM_CHAT_ID="..."
+# (ver el README para como conseguir ambos con @BotFather)
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+
 REST_BASE = "https://api.binance.com"
 SIGN_MARKET_DATA_CALLS = True  # flip to False if these specific calls reject the signature
 POLL_INTERVAL_SECONDS = 5
@@ -401,11 +409,26 @@ def load_recent_outcomes(limit=10):
     return outcomes[-limit:]
 
 
+def send_telegram(title, content):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": f"*{title}*\n{content}", "parse_mode": "Markdown"},
+            timeout=10,
+        )
+    except Exception as exc:
+        print(f"[telegram-error] {exc}")
+
+
 def send_notification(title, content):
-    """Push a phone notification via termux-api if available, always also
-    printing to console. Never raises -- a missing/broken termux-api must
-    not interrupt the polling loop."""
+    """Alerts via three independent channels -- console (always), Telegram
+    (if TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID are set) and termux-notification
+    (if available). Never raises -- a missing/broken channel must not
+    interrupt the polling loop; each is wrapped so the others still fire."""
     print(f"\n{'=' * 60}\n[ALERTA] {title}\n{content}\n{'=' * 60}\n")
+    send_telegram(title, content)
     try:
         import subprocess
 
@@ -415,7 +438,7 @@ def send_notification(title, content):
             check=False,
         )
     except Exception:
-        pass  # no termux-api installed, or not on Termux -- console alert above still fires
+        pass  # no termux-api installed, or not on Termux -- console/telegram alerts still fire
 
 
 # Streak-reversion win rates from backtest.py's 180-day run at the REAL
