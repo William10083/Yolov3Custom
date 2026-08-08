@@ -256,26 +256,63 @@ def get_order_book(market_id, vendor, token_id=None, condition_id=None):
     return api_get("/sapi/v1/w3w/wallet/prediction/order-book", params)
 
 
+LOG_HEADER = [
+    "polled_at_ms",
+    "market_id",
+    "http_status",
+    "api_timestamp",
+    "best_bid",
+    "best_ask",
+    "mid_price",
+    "btc_price",
+    "round_start_price",
+    "price_gap_usd",
+    "raw_body",
+]
+
+
 def ensure_log_file():
+    """Create the odds log, or migrate one written before columns were added.
+
+    Same failure that hit round_outcomes.csv: without this, DictReader keys
+    every row off the original short header and silently drops the newer
+    columns into the restkey, so analysis over the collected history reads
+    back empty. Fixed there but missed here, which cost a full analysis pass
+    over 6,980 already-collected snapshots.
+    """
     os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
     if not os.path.exists(LOG_FILE):
         with open(LOG_FILE, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(
-                [
-                    "polled_at_ms",
-                    "market_id",
-                    "http_status",
-                    "api_timestamp",
-                    "best_bid",
-                    "best_ask",
-                    "mid_price",
-                    "btc_price",
-                    "round_start_price",
-                    "price_gap_usd",
-                    "raw_body",
-                ]
-            )
+            csv.writer(f).writerow(LOG_HEADER)
+        return
+
+    with open(LOG_FILE, newline="") as f:
+        first = f.readline()
+    if not first.strip():
+        with open(LOG_FILE, "w", newline="") as f:
+            csv.writer(f).writerow(LOG_HEADER)
+        return
+
+    existing = next(csv.reader([first]), [])
+    if existing == LOG_HEADER:
+        return
+
+    with open(LOG_FILE, newline="") as f:
+        rows = list(csv.reader(f))
+
+    width = len(LOG_HEADER)
+    body = rows[1:]
+    # Older rows are shorter and end with raw_body; pad the middle so the JSON
+    # stays in the last column rather than sliding into a numeric field.
+    migrated = [LOG_HEADER]
+    for r in body:
+        if len(r) == width:
+            migrated.append(r)
+        elif len(r) < width:
+            migrated.append(r[:-1] + [""] * (width - len(r)) + [r[-1]])
+    with open(LOG_FILE, "w", newline="") as f:
+        csv.writer(f).writerows(migrated)
+    print(f"[migracion] live_odds_log.csv actualizado a {width} columnas ({len(migrated)-1} filas)")
 
 
 def _best_bid_ask(order_book_json):

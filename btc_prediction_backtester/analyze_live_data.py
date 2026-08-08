@@ -49,11 +49,54 @@ def wilson(successes, n, z=1.96):
     return (p, max(0.0, c - m), min(1.0, c + m))
 
 
-def load(path):
+ODDS_SCHEMA = [
+    "polled_at_ms", "market_id", "http_status", "api_timestamp",
+    "best_bid", "best_ask", "mid_price", "btc_price",
+    "round_start_price", "price_gap_usd", "raw_body",
+]
+OUTCOMES_SCHEMA = [
+    "market_id", "round_start_ms", "round_end_ms", "start_price", "end_price",
+    "outcome", "market_prob_up", "predicted_side", "predicted_reasoning",
+    "signal_correct", "signal_name", "entry_price",
+]
+
+
+def load(path, schema, last_field_fixed=False):
+    """Read rows positionally against the known schema instead of trusting the
+    file's header.
+
+    Both CSVs gained columns over time while keeping their original header, so
+    DictReader mismaps every newer row. Reading by position works because the
+    schema only ever grew by appending -- and for the odds log, by appending
+    *before* raw_body, which is always last. `last_field_fixed` handles that
+    case, mapping a short row's final value to the final column rather than
+    letting the JSON body slide into a numeric field.
+    """
     if not os.path.exists(path):
         return []
     with open(path, newline="") as f:
-        return list(csv.DictReader(f))
+        raw_rows = list(csv.reader(f))
+    if not raw_rows:
+        return []
+
+    body = raw_rows[1:] if raw_rows[0] and raw_rows[0][0] == schema[0] else raw_rows
+
+    out = []
+    for r in body:
+        if not r:
+            continue
+        row = dict.fromkeys(schema, "")
+        if last_field_fixed and len(r) < len(schema):
+            for i, v in enumerate(r[:-1]):
+                if i < len(schema) - 1:
+                    row[schema[i]] = v
+            row[schema[-1]] = r[-1]
+        else:
+            for i, v in enumerate(r):
+                if i < len(schema):
+                    row[schema[i]] = v
+        out.append(row)
+    return out
 
 
 def fnum(row, key):
@@ -64,6 +107,62 @@ def fnum(row, key):
         return float(v)
     except ValueError:
         return None
+
+
+def book_from_row(row):
+    """best_bid / best_ask / mid for a row, falling back to the raw JSON.
+
+    live_odds_log.csv grew columns over time and older files still carry the
+    original header, so DictReader drops everything added since into the
+    restkey. The full order book was always written to raw_body though, so
+    every row remains fully recoverable -- which matters, since that is the
+    entire history of quotes collected so far.
+    """
+    bid, ask = fnum(row, "best_bid"), fnum(row, "best_ask")
+    if bid is None or ask is None:
+        # Under a stale header the JSON can land in the restkey, and
+        # "raw_body" can hold some other column's value entirely -- so search
+        # every candidate for the one that actually looks like an order book
+        # rather than trusting either position.
+        candidates = [row.get("raw_body")] + list(row.get(None) or [])
+        raw = next((v for v in candidates if isinstance(v, str) and '"bids"' in v), None)
+        if raw:
+            try:
+                body = json.loads(raw)
+                if isinstance(body, dict):
+                    bids, asks = body.get("bids") or [], body.get("asks") or []
+                    bid = float(bids[0]["price"]) if bids else None
+                    ask = float(asks[0]["price"]) if asks else None
+            except (ValueError, KeyError, IndexError, TypeError):
+                pass
+    mid = round((bid + ask) / 2, 4) if (bid is not None and ask is not None) else None
+    return bid, ask, mid
+
+
+def entry_from_outcome_row(row):
+    """(signal_name, entry_price), recovering from predicted_reasoning when the
+    dedicated columns predate the row."""
+    name = (row.get("signal_name") or "").strip()
+    price = fnum(row, "entry_price")
+    if name and price is not None:
+        return name, price
+
+    reason = (row.get("predicted_reasoning") or "").strip()
+    if not reason:
+        extras = row.get(None) or []
+        reason = next((v for v in extras if isinstance(v, str) and " a 0." in v), "")
+    if not reason:
+        return name or None, price
+
+    if not name:
+        name = reason.split(" (")[0].split(";")[0].strip() or None
+    if price is None:
+        import re
+
+        m = re.search(r"\ba (0\.\d+)", reason)
+        if m:
+            price = float(m.group(1))
+    return name, price
 
 
 def section(title):
@@ -86,7 +185,7 @@ def q1_market_calibration(odds, outcomes):
     buckets = defaultdict(lambda: [0, 0])
     used = 0
     for r in odds:
-        mid_price = fnum(r, "mid_price")
+        _, _, mid_price = book_from_row(r)
         market_id = (r.get("market_id") or "").strip()
         if mid_price is None or market_id not in outcome_by_market:
             continue
@@ -125,19 +224,20 @@ def q2_adverse_selection(outcomes):
     signature of being picked off."""
     section("2. ¿El precio que pagamos predice que perdimos?")
 
-    graded = [
-        r for r in outcomes
-        if (r.get("signal_correct") or "").strip() in ("True", "False")
-        and fnum(r, "entry_price") is not None
-    ]
+    graded = []
+    for r in outcomes:
+        if (r.get("signal_correct") or "").strip() not in ("True", "False"):
+            continue
+        _, price = entry_from_outcome_row(r)
+        if price is not None:
+            graded.append((r, price))
+
     if len(graded) < 10:
-        print(f"  Solo {len(graded)} apuestas con precio registrado. Hacen falta ~30+.")
-        print("  (entry_price se empezo a guardar recien; segui recolectando.)")
+        print(f"  Solo {len(graded)} apuestas con precio recuperable. Hacen falta ~30+.")
         return
 
     buckets = defaultdict(lambda: [0, 0])
-    for r in graded:
-        p = fnum(r, "entry_price")
+    for r, p in graded:
         b = round(p * 20) / 20  # 0.05 wide
         buckets[b][1] += 1
         if r["signal_correct"] == "True":
@@ -164,7 +264,7 @@ def q3_dislocation(odds):
     diffs = []
     by_round = defaultdict(list)
     for r in odds:
-        mid_price = fnum(r, "mid_price")
+        _, _, mid_price = book_from_row(r)
         btc = fnum(r, "btc_price")
         start = fnum(r, "round_start_price")
         if None in (mid_price, btc, start) or start <= 0:
@@ -204,8 +304,7 @@ def q4_book_quality(odds):
     empty = 0
     total = 0
     for r in odds:
-        bid = fnum(r, "best_bid")
-        ask = fnum(r, "best_ask")
+        bid, ask, _ = book_from_row(r)
         total += 1
         if bid is None or ask is None:
             empty += 1
@@ -247,7 +346,8 @@ def overall(outcomes):
 
     per = defaultdict(lambda: [0, 0])
     for r in graded:
-        name = (r.get("signal_name") or "(sin registrar)").strip()
+        name, _ = entry_from_outcome_row(r)
+        name = name or "(sin registrar)"
         per[name][1] += 1
         if r["signal_correct"] == "True":
             per[name][0] += 1
@@ -265,8 +365,8 @@ def overall(outcomes):
 
 
 if __name__ == "__main__":
-    odds = load(ODDS)
-    outcomes = load(OUTCOMES)
+    odds = load(ODDS, ODDS_SCHEMA, last_field_fixed=True)
+    outcomes = load(OUTCOMES, OUTCOMES_SCHEMA)
     print(f"live_odds_log.csv: {len(odds)} filas")
     print(f"round_outcomes.csv: {len(outcomes)} filas")
 
