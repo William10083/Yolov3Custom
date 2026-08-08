@@ -357,16 +357,24 @@ tienen niveles de evidencia muy diferentes:
 Igual que con las credenciales de Binance: **nunca pegues el token de
 Telegram en el chat** -- solo en tu terminal.
 
-1. **Que lado considerar, al inicio de cada ronda** (`check_streak_signal`):
-   se activa cuando hubo una racha de 3 o 4 resultados iguales seguidos,
-   basado en `streak_reversion_3/4` del backtest historico (con la fee
-   real de 2% ya confirmada). Esto tiene respaldo estadistico
-   preliminar -- pero **no esta confirmado contra datos de order-book
-   en vivo todavia** (eso es justo lo que este logger esta juntando), y
-   el backtest no incluye price impact real. No es una garantia, es
-   informacion para tu propio criterio. Racha de 2 no dispara alerta a
-   proposito (pasa en ~50% de las rondas, seria puro ruido).
-2. **Spread angosto = buen momento de ejecucion** (`check_spread_alert`):
+1. **Prediccion con razon, al inicio de cada ronda** (`build_prediction`):
+   combina la cuota que el propio mercado ya esta mostrando (puesta por
+   creadores de mercado profesionales -- la mejor estimacion disponible,
+   no ventaja nuestra) con la señal de racha si esta activa
+   (`check_streak_signal`, se activa con 3 o 4 resultados iguales
+   seguidos, basado en `streak_reversion_3/4` del backtest historico con
+   la fee real de 2%). El mensaje dice explicitamente si la señal
+   coincide o no con lo que el mercado esta pricing, y da un rango
+   aproximado de cierre calculado con la volatilidad historica real (NO
+   un precio exacto). Racha de 2 no dispara señal propia a proposito
+   (pasa en ~50% de las rondas, seria puro ruido) -- en esos casos la
+   prediccion es simplemente "lo que dice el mercado".
+2. **Resultado de cada ronda, cuando resuelve** (`log_round_outcome`):
+   compara la prediccion contra el resultado real y manda ACERTO/FALLO,
+   mas la precision acumulada de las ultimas 50 predicciones evaluadas
+   (`compute_running_accuracy`). Esto es honesto y verificable -- vas a
+   ver en vivo si el ~53% del backtest se sostiene o no.
+3. **Spread angosto = buen momento de ejecucion** (`check_spread_alert`):
    esto **no predice Up/Down para nada**. Ya investigamos con
    `option_edge_analysis.py` si el timing dentro de la ronda agrega
    señal direccional y la respuesta fue no -- el momentum del ultimo
@@ -375,7 +383,17 @@ Telegram en el chat** -- solo en tu terminal.
    barato entrar/salir ahora mismo), para *si ya decidiste* un lado, no
    para decidir cual.
 
-Ninguna de las dos coloca ordenes -- son notificaciones, no acciones.
+**Importante:** esto no es un sistema que "aprende" ni se auto-ajusta.
+Con la poca muestra que este script puede juntar en la practica (decenas
+o pocos cientos de rondas), cualquier intento de "reentrenar" parametros
+en vivo terminaria ajustandose a ruido, no aprendiendo nada real -- por
+eso `compute_running_accuracy` solo *mide y reporta* honestamente si la
+señal funciona, en vez de fingir que se corrige sola. Y ninguna
+combinacion de señales acá garantiza 100% de acierto -- es matematicamente
+imposible en un mercado con creadores de mercado profesionales del otro
+lado; cualquier cosa que prometa eso esta mintiendo.
+
+Ninguna de las alertas coloca ordenes -- son notificaciones, no acciones.
 
 ## Como correrlo vos mismo
 

@@ -351,7 +351,38 @@ def ensure_outcomes_file():
     if not os.path.exists(OUTCOMES_FILE):
         with open(OUTCOMES_FILE, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["market_id", "round_start_ms", "round_end_ms", "start_price", "end_price", "outcome"])
+            writer.writerow(
+                [
+                    "market_id",
+                    "round_start_ms",
+                    "round_end_ms",
+                    "start_price",
+                    "end_price",
+                    "outcome",
+                    "market_prob_up",
+                    "predicted_side",
+                    "predicted_reasoning",
+                    "signal_correct",
+                ]
+            )
+
+
+def compute_running_accuracy(last_n=50):
+    """Honest accuracy tracking -- NOT a self-learning model. With the
+    small sample this script can realistically gather, anything fancier
+    would just be fitting noise. This only counts predictions that had a
+    definite Up/Down call (market_side ties are skipped)."""
+    if not os.path.exists(OUTCOMES_FILE):
+        return "Sin historial todavia."
+    with open(OUTCOMES_FILE, newline="") as f:
+        rows = list(csv.DictReader(f))
+    graded = [r for r in rows if r.get("signal_correct") in ("True", "False")]
+    graded = graded[-last_n:]
+    if not graded:
+        return "Sin predicciones evaluadas todavia."
+    correct = sum(1 for r in graded if r["signal_correct"] == "True")
+    total = len(graded)
+    return f"Precision acumulada: {correct}/{total} ({correct/total*100:.1f}%) en las ultimas {total} predicciones."
 
 
 def resolve_round_outcome(round_start_ms, retries=10, delay_seconds=5):
@@ -383,17 +414,45 @@ def resolve_round_outcome(round_start_ms, retries=10, delay_seconds=5):
     return None, None, None
 
 
-def log_round_outcome(market_id, round_start_ms):
+def log_round_outcome(market_id, round_start_ms, market_prob_up=None, predicted_side=None, predicted_reasoning=None):
     ensure_outcomes_file()
     round_end_ms = round_start_ms + ROUND_SECONDS * 1000
     start_price, end_price, outcome = resolve_round_outcome(round_start_ms)
+
+    signal_correct = None
+    if predicted_side and outcome in ("Up", "Down"):
+        signal_correct = predicted_side == outcome
+
     with open(OUTCOMES_FILE, "a", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow([market_id, round_start_ms, round_end_ms, start_price, end_price, outcome])
+        writer.writerow(
+            [
+                market_id,
+                round_start_ms,
+                round_end_ms,
+                start_price,
+                end_price,
+                outcome,
+                market_prob_up,
+                predicted_side,
+                predicted_reasoning,
+                signal_correct,
+            ]
+        )
+
     if outcome:
         print(f"[outcome] market_id={market_id} -> {outcome} (${start_price:,.2f} -> ${end_price:,.2f})")
     else:
         print(f"[outcome] market_id={market_id} -> no se pudo resolver (klines no disponibles todavia)")
+
+    if predicted_side and outcome in ("Up", "Down"):
+        result_text = "ACERTO" if signal_correct else "FALLO"
+        send_notification(
+            f"Ronda {market_id} resuelta: {result_text}",
+            f"Predijimos {predicted_side} ({predicted_reasoning})\n"
+            f"Resultado real: {outcome} (${start_price:,.2f} -> ${end_price:,.2f})\n"
+            f"{compute_running_accuracy()}",
+        )
     return outcome
 
 
@@ -475,6 +534,66 @@ def check_streak_signal(recent_outcomes):
     }
 
 
+# Relative stdev of 5-minute BTC moves, from option_edge_analysis.py's
+# calibration against 180 days of historical data (sigma(5min)=0.1445%).
+# Approximate and NOT live-recalculated -- used only for a rough closing
+# price range, never as a point prediction.
+ROUND_SIGMA_5MIN_PCT = 0.1445
+
+
+def _market_prob_up(current_round):
+    outcomes = current_round.get("outcomes")
+    if not isinstance(outcomes, list):
+        return None
+    for o in outcomes:
+        if str(o.get("name", "")).lower() == "up":
+            raw = o.get("chance", o.get("price"))
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def build_prediction(current_round, streak_signal, round_start_price):
+    """Combines what we actually have evidence for: the market's own live
+    price (set by real market makers -- the single best available
+    estimate) plus our streak signal when one is active. NOT a claim of
+    certainty at any point -- see check_streak_signal()'s docstring."""
+    market_prob_up = _market_prob_up(current_round)
+    market_side = None
+    if market_prob_up is not None and market_prob_up != 0.5:
+        market_side = "Up" if market_prob_up > 0.5 else "Down"
+    market_desc = f"{market_prob_up*100:.0f}% Up / {(1-market_prob_up)*100:.0f}% Down" if market_prob_up is not None else "sin dato"
+
+    if streak_signal:
+        predicted_side = streak_signal["suggested_side"]
+        agreement = "coincide" if predicted_side == market_side else "NO coincide"
+        reasoning = (
+            f"racha de {streak_signal['streak_len']}x {streak_signal['streak_direction']} "
+            f"(historico {streak_signal['historical_stats']}); cuota del mercado: {market_desc} -- "
+            f"la señal {agreement} con lo que el mercado esta pricing"
+        )
+    else:
+        predicted_side = market_side
+        reasoning = (
+            f"sin racha activa -- vamos con la cuota del mercado ({market_desc}), "
+            f"que no es ventaja nuestra, es la mejor estimacion disponible (creadores de mercado reales)"
+        )
+
+    range_text = ""
+    if round_start_price:
+        one_sigma = round_start_price * ROUND_SIGMA_5MIN_PCT / 100
+        lo68, hi68 = round_start_price - one_sigma, round_start_price + one_sigma
+        lo90, hi90 = round_start_price - 1.645 * one_sigma, round_start_price + 1.645 * one_sigma
+        range_text = (
+            f"\nRango aprox. de cierre (volatilidad historica, NO una prediccion exacta de precio): "
+            f"68% ${lo68:,.0f}-${hi68:,.0f} | 90% ${lo90:,.0f}-${hi90:,.0f}"
+        )
+
+    return predicted_side, reasoning, range_text, market_prob_up
+
+
 SPREAD_TIGHT_THRESHOLD = 0.03  # arbitrary, adjustable -- not derived from any backtest
 
 
@@ -536,17 +655,18 @@ def poll_loop(market_id, current_round, topic):
 
     recent_outcomes = load_recent_outcomes()
     signal = check_streak_signal(recent_outcomes)
-    if signal:
+    predicted_side, reasoning, range_text, market_prob_up = build_prediction(current_round, signal, round_start_price)
+    if predicted_side:
         send_notification(
-            f"Racha de {signal['streak_len']}x {signal['streak_direction']} -- considerar {signal['suggested_side']}",
-            f"Historico: {signal['historical_stats']}. NO confirmado en vivo, no incluye price impact. Decision tuya.",
+            f"Ronda {market_id}: prediccion {predicted_side}",
+            f"Razon: {reasoning}{range_text}\n\n(Historico, no garantia -- ver README)",
         )
 
     while True:
         try:
             if time.time() >= next_refresh_at:
                 print("\n[rollover] fin de ronda esperado -- resolviendo resultado de la ronda anterior...")
-                outcome = log_round_outcome(market_id, round_start_ms)
+                outcome = log_round_outcome(market_id, round_start_ms, market_prob_up, predicted_side, reasoning)
                 if outcome in ("Up", "Down"):
                     recent_outcomes.append(outcome)
                     recent_outcomes = recent_outcomes[-10:]
@@ -564,10 +684,13 @@ def poll_loop(market_id, current_round, topic):
                 spread_is_tight = False
 
                 signal = check_streak_signal(recent_outcomes)
-                if signal:
+                predicted_side, reasoning, range_text, market_prob_up = build_prediction(
+                    current_round, signal, round_start_price
+                )
+                if predicted_side:
                     send_notification(
-                        f"Racha de {signal['streak_len']}x {signal['streak_direction']} -- considerar {signal['suggested_side']}",
-                        f"Historico: {signal['historical_stats']}. NO confirmado en vivo, no incluye price impact. Decision tuya.",
+                        f"Ronda {market_id}: prediccion {predicted_side}",
+                        f"Razon: {reasoning}{range_text}\n\n(Historico, no garantia -- ver README)",
                     )
 
             resp = get_order_book(market_id, vendor, token_id, condition_id)
