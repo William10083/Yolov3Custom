@@ -878,6 +878,20 @@ MIN_EV_TO_ALERT = 0.02  # below this the "edge" is inside our own error bars
 # masquerading as free money, so skip rather than bet into it.
 MAX_FAIR_VALUE_DISAGREEMENT = 0.10
 
+# Only bet while the round is still close to a coin flip. Two reasons, both
+# measured against the 180-day dataset rather than assumed:
+#
+#   1. The signals were backtested on rounds judged from their start, where the
+#      outcome is near even. Away from that, the edge is unmeasured.
+#   2. Checking the fair-value model's calibration at moderate deviations shows
+#      moves tend to CONTINUE, not revert: at fair 0.40 the real Up rate is
+#      36.0%, at 0.60 it is 64.2% -- both further out than predicted. Every
+#      signal here is contrarian, so firing at those levels means fighting that
+#      drift. At 0.50 the model's error is -0.1pp, effectively unbiased.
+#
+# 0.08 keeps us in roughly 0.42-0.58, the band where the model is honest.
+MAX_FAIR_DEVIATION_TO_BET = 0.08
+
 
 def _normal_cdf(x):
     return 0.5 * (1 + math.erf(x / math.sqrt(2)))
@@ -942,18 +956,36 @@ def compute_bet_edge(
     if not 0 < price < 1:
         return None
 
-    # The signal's backtested win rate was measured at ROUND START, when the
-    # market sits near even money. It is an edge OVER fair value (~2pp), not a
-    # standalone probability. Treating it as absolute is what made a cheap
-    # price look like free money: with q pinned at 0.519, EV rose purely
-    # because p fell -- but p falls precisely when the market has information
-    # we don't. So anchor on the market's price and add only our measured edge.
-    edge_over_fair = signal["q"] - 0.5
-    q = min(0.99, max(0.01, price + edge_over_fair))
-
+    # Build our OWN probability from the factors, rather than borrowing the
+    # market's. Inside a round the market's price is close to a mechanical
+    # function of how far BTC has moved and how much time is left -- not
+    # independent insight -- so deferring to it just launders our own inputs
+    # back to us. We can compute that same fair value directly, and it keeps
+    # us off the market's round-open reference, which is what disagreed by
+    # 15pp in the bad alert.
+    #
+    #   our_prob = fair value from the live move  +  the signal's measured edge
+    #
+    # The market's price then serves its actual purpose: the cost of the bet.
     fair = naive_fair_prob(side, round_start_price, btc_price, seconds_into_round)
-    disagreement = abs(price - fair) if fair is not None else None
-    reference_looks_wrong = disagreement is not None and disagreement > MAX_FAIR_VALUE_DISAGREEMENT
+    if fair is None:
+        return None
+
+    edge_over_fair = signal["q"] - 0.5
+    q = min(0.99, max(0.01, fair + edge_over_fair))
+
+    # A wide gap between our fair value and the market's price, this early in a
+    # round, means we and the market are pricing off different opening prices
+    # (ours from Binance klines, theirs resolved via Chainlink). That is a stale
+    # reference on our side, not an edge.
+    disagreement = abs(price - fair)
+    reference_looks_wrong = disagreement > MAX_FAIR_VALUE_DISAGREEMENT
+
+    # The backtest measured these signals on rounds seen from the start, with
+    # the outcome still a near coin flip. Once the live move has already pushed
+    # fair value far from even, we are in a situation the backtest never
+    # measured, so the edge cannot be assumed to carry.
+    move_too_far = abs(fair - 0.5) > MAX_FAIR_DEVIATION_TO_BET
 
     ev = q * (1 - fee_rate) / price - 1
     return {
@@ -965,8 +997,9 @@ def compute_bet_edge(
         "naive_fair": fair,
         "disagreement": disagreement,
         "reference_looks_wrong": reference_looks_wrong,
+        "move_too_far": move_too_far,
         "max_price_worth_paying": round(q * (1 - fee_rate), 4),
-        "worth_it": ev >= MIN_EV_TO_ALERT and not reference_looks_wrong,
+        "worth_it": ev >= MIN_EV_TO_ALERT and not reference_looks_wrong and not move_too_far,
     }
 
 
@@ -1008,6 +1041,17 @@ def build_status_message(market_id, signal, best_edge, recent_outcomes, btc_pric
             f"<i>{signal['detail']}</i>\n\n"
             f"⏱ <i>No se pudo evaluar el precio dentro de los primeros "
             f"{MAX_SECONDS_INTO_ROUND_TO_BET}s (sin libro de órdenes a tiempo).</i>\n\n"
+        )
+    elif best_edge.get("move_too_far"):
+        body = (
+            f"📊 <b>Señal</b>\n{signal['name']} → sugiere {best_edge['side']}\n"
+            f"<i>{signal['detail']}</i>\n\n"
+            f"⏭ <b>Descartada: la ronda ya se definió demasiado</b>\n"
+            f"Valor justo de {best_edge['side']}: {best_edge['naive_fair']:.2f}\n\n"
+            f"<i>Las señales se midieron al inicio de ronda, con el resultado aún "
+            f"parejo. Con el precio ya corrido, además, los movimientos tienden a "
+            f"seguir en vez de revertir — apostar contrarian acá sería pelear "
+            f"contra eso.</i>\n\n"
         )
     elif best_edge.get("reference_looks_wrong"):
         body = (

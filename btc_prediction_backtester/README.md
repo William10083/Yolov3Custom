@@ -450,31 +450,56 @@ Telegram en el chat** -- solo en tu terminal.
    0.31 no era una ganga: era señal de que **el mercado y nosotros no
    estabamos mirando el mismo precio de apertura**.
 
-   Dos arreglos:
+   **La probabilidad se calcula con nuestros factores, no copiando al
+   mercado.** Una version intermedia anclaba `q` al precio del mercado,
+   pero eso tampoco tenia sentido: dentro de la ronda ese precio es casi
+   una funcion mecanica de cuanto se movio BTC y cuanto falta -- no es
+   informacion independiente, asi que deferir a el es lavar nuestros
+   propios datos y recibirlos de vuelta. Ese mismo valor lo podemos
+   calcular directamente:
 
-   - **`q` se ancla al precio del mercado.** El win rate del backtest se
-     midio al inicio de ronda, con el mercado cerca de 50/50 -- o sea, es
-     una ventaja de ~2pp **sobre el valor justo**, no una probabilidad
-     absoluta. Ahora `q = precio_mercado + (q_backtest - 0.5)`. El precio
-     del mercado es informacion real y se respeta.
-   - **Chequeo de coherencia** (`naive_fair_prob`): se compara el precio
-     del mercado contra el valor justo segun volatilidad historica. Si
-     difieren mas de 10 puntos, se descarta la ronda -- esa brecha indica
-     un problema de datos de nuestro lado (referencia desfasada), no una
-     oportunidad.
+   ```
+   q = valor_justo(movimiento en vivo, tiempo restante, volatilidad)
+       + ventaja_medida_de_la_señal
+   ```
 
-   Recalculadas con el arreglo, las dos alertas reales que dispararon
-   antes quedan asi:
+   El precio del mercado queda para lo unico que realmente aporta: **cuanto
+   cuesta la apuesta**.
 
-   | Alerta | EV antes | EV ahora | Veredicto |
+   **Validacion del modelo de valor justo** (`naive_fair_prob`), contra las
+   51,839 rondas reales, medido a 1 minuto de iniciada la ronda:
+
+   | Valor justo | Rondas | Up real | Error |
    |---|---|---|---|
-   | Down a 0.49 (BTC +$0.00) | +3.8% | +1.8% | no alerta (bajo umbral) |
-   | Down a 0.31 (BTC +$9.05) | +64.1% | +4.0% | no alerta (referencia sospechosa, 15pp) |
+   | 0.30 | 4,366 | 27.7% | −2.3pp |
+   | 0.40 | 10,043 | 36.0% | −4.0pp |
+   | **0.50** | **16,740** | **49.9%** | **−0.1pp** |
+   | 0.60 | 9,987 | 64.2% | +4.2pp |
+   | 0.70 | 4,270 | 73.0% | +3.0pp |
+   | 0.90 | 904 | 81.2% | −8.8pp |
 
-   Consecuencia practica: **las alertas van a ser bastante mas raras**.
-   Con una ventaja de ~2pp y fee 2%, hace falta que el mercado ofrezca
-   nuestro lado por debajo de ~0.47-0.54 segun la señal. Eso es correcto:
-   antes disparaba seguido porque el calculo estaba inflado.
+   Dos cosas salen de ahi, y ninguna era obvia:
+
+   - En 0.50 el modelo es practicamente insesgado (−0.1pp).
+   - En movimientos moderados los precios **CONTINUAN**, no revierten: en
+     0.40 el Up real es 36% (mas abajo de lo predicho), en 0.60 es 64.2%
+     (mas arriba). Todas nuestras señales son contrarian y se midieron al
+     inicio de ronda -- dispararlas con el precio ya corrido seria pelear
+     contra esa deriva.
+
+   Por eso se agrego `MAX_FAIR_DEVIATION_TO_BET = 0.08`: solo se apuesta
+   mientras la ronda siga pareja (~0.42-0.58), la banda donde el modelo es
+   honesto. Mas el chequeo de coherencia: si el precio del mercado y
+   nuestro valor justo difieren mas de 10 puntos, es que estamos usando
+   precios de apertura distintos (el nuestro de klines de Binance, el suyo
+   resuelto por Chainlink) -- un dato desfasado, no una ganga.
+
+   Las dos alertas reales, con el modelo final:
+
+   | Alerta | EV original | Ahora | Veredicto |
+   |---|---|---|---|
+   | Down a 0.49 (BTC +$0.00) | +3.8% | **+4.4%** | **alerta** -- BTC quieto, valor justo 0.50, mercado vende a 0.49 |
+   | Down a 0.31 (BTC +$9.05) | +64.1% | — | descartada: valor justo 0.46 vs mercado 0.31, 15pp de discrepancia |
 
 1. **Alerta de VALOR** (`compute_bet_edge`): el analisis de verdad. Decir
    "apostar Up porque el mercado marca 72% Up" no es analisis, es repetir
