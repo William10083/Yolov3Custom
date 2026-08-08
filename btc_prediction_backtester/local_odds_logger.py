@@ -569,37 +569,140 @@ def fmt_gap(gap):
     return f"+${gap:,.2f}" if gap >= 0 else f"-${abs(gap):,.2f}"
 
 
-# Streak-reversion win rates from backtest.py's 180-day run at the REAL
-# confirmed fee (2% = feeRateBps 200, from live market/list data -- see
-# README). Only k>=3 is used as an alert trigger: k=2 fires roughly every
-# other round (P(same as previous)~50%), too frequent to treat as a
-# special "this round is worth a look" signal -- it's not what "solo
-# cuando es muy segura" (the original ask) meant.
-_STREAK_STATS = {
-    3: "53.2% OOS, IC95% [52.0%, 54.5%] (n~6000 en backtest historico)",
-    4: "53.2%-53.7% OOS, IC95% mas ancho ~[51%, 55%] (menos muestra)",
-}
+def get_pre_round_candles(round_start_ms, minutes=30, retries=3, delay_seconds=2):
+    """1-minute candles from `minutes` before the round's open through the
+    open itself. Same public klines endpoint as everything else here.
+
+    This is what feeds the price-move and order-flow signals: information
+    the app never shows you, unlike the Up/Down percentage.
+    """
+    for attempt in range(retries):
+        try:
+            resp = requests.get(
+                "https://data-api.binance.vision/api/v3/klines",
+                params={
+                    "symbol": "BTCUSDT",
+                    "interval": "1m",
+                    "startTime": round_start_ms - minutes * 60_000,
+                    "limit": minutes + 1,
+                },
+                timeout=10,
+            )
+            candles = resp.json()
+            if isinstance(candles, list) and candles:
+                return {c[0]: c for c in candles}
+        except Exception as exc:
+            print(f"[pre-round-error] intento {attempt + 1}/{retries}: {exc}")
+        time.sleep(delay_seconds)
+    return {}
 
 
-def check_streak_signal(recent_outcomes):
-    """NOT a validated live trading signal -- based on backtest.py's
-    historical 180-day backtest at the real 2% fee, which does NOT include
-    price impact/slippage (a real, separate cost -- see README). Not yet
-    confirmed against the live order-book data this script is collecting.
-    Use your own judgment; this is informational, not a recommendation."""
-    if len(recent_outcomes) < 3:
+def _pct_move_before(by_time, round_start_ms, minutes):
+    """% price move over the `minutes` leading into the round, using OPEN
+    prices at both ends -- the same convention backtest.py used, so the
+    win rates measured there actually apply to what we compute here."""
+    a = by_time.get(round_start_ms - minutes * 60_000)
+    b = by_time.get(round_start_ms)
+    if not a or not b:
         return None
-    last3 = recent_outcomes[-3:]
-    if len(set(last3)) != 1:
+    start, end = float(a[1]), float(b[1])
+    return None if start == 0 else (end - start) / start * 100
+
+
+def _taker_buy_ratio_before(by_time, round_start_ms, minutes):
+    """Share of volume that was aggressive BUYing in the `minutes` before
+    the round. Kline index 5 = volume, 9 = taker buy base volume."""
+    vol = buy = 0.0
+    for m in range(minutes, 0, -1):
+        c = by_time.get(round_start_ms - m * 60_000)
+        if c:
+            vol += float(c[5])
+            buy += float(c[9])
+    return None if vol <= 0 else buy / vol
+
+
+# Every entry is a strategy that cleared breakeven in backtest.py's 180-day
+# run at the REAL 2% fee, with `q` set to the LOWER bound of its 95% CI --
+# never the midpoint, which would overstate the edge systematically.
+#
+# Deliberately excluded: streak_reversion_4 and _5. They looked strong in an
+# earlier run, but in the corrected open-price backtest at 2% fee their CI
+# lower bound no longer clears breakeven, so betting them is not justified.
+_SIGNAL_SPECS = [
+    # (name, q, kind, params) -- q = CI95% lower bound, out-of-sample
+    ("micro_mean_reversion_3m", 0.522, "revert", {"minutes": 3, "min_move_pct": 0.05}),
+    ("volume_imbalance_contrarian_15m", 0.519, "flow", {"minutes": 15, "threshold": 0.65}),
+    ("volume_imbalance_contrarian_3m", 0.518, "flow", {"minutes": 3, "threshold": 0.65}),
+    ("volume_imbalance_contrarian_5m", 0.518, "flow", {"minutes": 5, "threshold": 0.65}),
+    ("micro_mean_reversion_1m", 0.517, "revert", {"minutes": 1, "min_move_pct": 0.05}),
+    ("micro_mean_reversion_5m", 0.513, "revert", {"minutes": 5, "min_move_pct": 0.05}),
+    ("streak_reversion_3", 0.511, "streak", {"k": 3}),
+    ("contrarian_last_1", 0.509, "streak", {"k": 1}),
+]
+
+
+def collect_signals(recent_outcomes, by_time, round_start_ms):
+    """Evaluate every backtested strategy against the current round.
+
+    Returns them sorted strongest-first. Note these are NOT independent
+    confirmations of each other -- they all measure the same short-horizon
+    mean-reversion effect the variance-ratio test picked up, so agreement
+    between them must not be compounded into a higher probability.
+    """
+    fired = []
+    for name, q, kind, params in _SIGNAL_SPECS:
+        side = detail = None
+
+        if kind == "streak":
+            k = params["k"]
+            if len(recent_outcomes) >= k:
+                window = recent_outcomes[-k:]
+                if len(set(window)) == 1:
+                    side = "Down" if window[0] == "Up" else "Up"
+                    detail = f"{k} ronda(s) seguidas {window[0]}"
+
+        elif kind == "revert":
+            pct = _pct_move_before(by_time, round_start_ms, params["minutes"])
+            if pct is not None and abs(pct) >= params["min_move_pct"]:
+                side = "Down" if pct > 0 else "Up"
+                detail = f"BTC movio {pct:+.3f}% en {params['minutes']}min previos"
+
+        elif kind == "flow":
+            ratio = _taker_buy_ratio_before(by_time, round_start_ms, params["minutes"])
+            if ratio is not None:
+                if ratio >= params["threshold"]:
+                    side, detail = "Down", f"{ratio*100:.0f}% del volumen fue compra agresiva ({params['minutes']}min)"
+                elif ratio <= 1 - params["threshold"]:
+                    side, detail = "Up", f"{ratio*100:.0f}% del volumen fue compra agresiva ({params['minutes']}min)"
+
+        if side:
+            fired.append({"name": name, "q": q, "side": side, "detail": detail})
+
+    fired.sort(key=lambda s: s["q"], reverse=True)
+    return fired
+
+
+def pick_signal(fired):
+    """Use the single strongest fired signal, never a blend.
+
+    Combining correlated signals into one number would mean inventing a
+    probability no backtest ever measured. Taking the best single one keeps
+    `q` exactly equal to a figure that was actually validated; the others
+    are reported as context so agreement or disagreement is visible.
+    """
+    if not fired:
         return None
-    streak_direction = last3[0]
-    streak_len = 4 if (len(recent_outcomes) >= 4 and recent_outcomes[-4] == streak_direction) else 3
-    suggested_side = "Down" if streak_direction == "Up" else "Up"
+    best = fired[0]
+    agree = [s for s in fired[1:] if s["side"] == best["side"]]
+    disagree = [s for s in fired[1:] if s["side"] != best["side"]]
     return {
-        "streak_direction": streak_direction,
-        "streak_len": streak_len,
-        "suggested_side": suggested_side,
-        "historical_stats": _STREAK_STATS[streak_len],
+        "suggested_side": best["side"],
+        "q": best["q"],
+        "name": best["name"],
+        "detail": best["detail"],
+        "agree": agree,
+        "disagree": disagree,
+        "n_fired": len(fired),
     }
 
 
@@ -624,12 +727,6 @@ def _market_prob_up(current_round):
     return None
 
 
-# Conservative win-rate estimate per streak length: the LOWER bound of the
-# backtest's 95% CI, not the point estimate. Using the point estimate would
-# systematically overstate the edge -- if the true rate sits at the bottom of
-# the interval, every bet sized off the midpoint is a losing bet.
-_STREAK_WIN_PROB_CONSERVATIVE = {3: 0.520, 4: 0.510}
-
 MIN_EV_TO_ALERT = 0.02  # below this the "edge" is inside our own error bars
 
 # The backtest measured betting reversion AT THE ROUND'S START. Once BTC has
@@ -640,7 +737,7 @@ MIN_EV_TO_ALERT = 0.02  # below this the "edge" is inside our own error bars
 MAX_SECONDS_INTO_ROUND_TO_BET = 45
 
 
-def compute_bet_edge(streak_signal, best_bid, best_ask, fee_rate, seconds_into_round=0):
+def compute_bet_edge(signal, best_bid, best_ask, fee_rate, seconds_into_round=0):
     """The actual analysis: is the market's price CHEAP relative to our
     estimated probability?
 
@@ -657,13 +754,13 @@ def compute_bet_edge(streak_signal, best_bid, best_ask, fee_rate, seconds_into_r
     ask is approximately 1 - (best bid on Up). We only poll the Up book,
     which is why Down's price is derived rather than read directly.
     """
-    if streak_signal is None or best_bid is None or best_ask is None:
+    if signal is None or best_bid is None or best_ask is None:
         return None
     if seconds_into_round > MAX_SECONDS_INTO_ROUND_TO_BET:
         return None
 
-    side = streak_signal["suggested_side"]
-    q = _STREAK_WIN_PROB_CONSERVATIVE[streak_signal["streak_len"]]
+    side = signal["suggested_side"]
+    q = signal["q"]
     price = best_ask if side == "Up" else round(1 - best_bid, 4)
     if not 0 < price < 1:
         return None
@@ -679,6 +776,24 @@ def compute_bet_edge(streak_signal, best_bid, best_ask, fee_rate, seconds_into_r
     }
 
 
+def format_signal_consensus(signal):
+    """Show which other strategies fired and on which side.
+
+    Presented as context only: these signals are correlated (all pick up the
+    same mean-reversion effect), so agreement is NOT extra evidence and is
+    never folded into `q`. Disagreement is worth seeing though.
+    """
+    parts = []
+    if signal.get("agree"):
+        parts.append(f"✓ {len(signal['agree'])} más coinciden")
+    if signal.get("disagree"):
+        nombres = ", ".join(s["name"] for s in signal["disagree"][:2])
+        parts.append(f"✗ {len(signal['disagree'])} en contra ({nombres})")
+    if not parts:
+        return ""
+    return "\n<i>" + " · ".join(parts) + "</i>"
+
+
 def build_status_message(market_id, signal, best_edge, recent_outcomes, btc_price, price_gap_usd, fee_rate):
     """The once-per-round 'nothing to do here' summary. Sent silently, so it
     confirms the bot is alive and shows WHY a round was skipped without
@@ -688,22 +803,24 @@ def build_status_message(market_id, signal, best_edge, recent_outcomes, btc_pric
     if signal is None:
         ultimas = " ".join(recent_outcomes[-5:]) if recent_outcomes else "sin historial"
         body = (
-            f"📊 <b>Señal</b>\nSin racha de 3+ iguales\n"
+            f"📊 <b>Señal</b>\nNinguna de las {len(_SIGNAL_SPECS)} estrategias se activó\n"
             f"Últimas rondas: <code>{ultimas}</code>\n\n"
-            f"<i>La señal solo aplica tras 3-4 resultados iguales seguidos.</i>\n\n"
+            f"<i>Se evalúan rachas, movimiento de precio previo y flujo de órdenes. "
+            f"Ninguna cumplió su condición de disparo.</i>\n\n"
         )
     elif best_edge is None:
         body = (
-            f"📊 <b>Señal</b>\nRacha {signal['streak_len']}x {signal['streak_direction']} → "
-            f"sugiere {signal['suggested_side']}\n\n"
+            f"📊 <b>Señal</b>\n{signal['name']} → sugiere {signal['suggested_side']}\n"
+            f"<i>{signal['detail']}</i>\n\n"
             f"⏱ <i>No se pudo evaluar el precio dentro de los primeros "
             f"{MAX_SECONDS_INTO_ROUND_TO_BET}s (sin libro de órdenes a tiempo).</i>\n\n"
         )
     else:
         body = (
-            f"📊 <b>Señal</b>\nRacha {signal['streak_len']}x {signal['streak_direction']} → "
-            f"sugiere {best_edge['side']}\n"
-            f"Prob. estimada: {best_edge['q']*100:.1f}%\n\n"
+            f"📊 <b>Señal</b>\n{signal['name']} → sugiere {best_edge['side']}\n"
+            f"<i>{signal['detail']}</i>\n"
+            f"Prob. estimada: {best_edge['q']*100:.1f}%"
+            f"{format_signal_consensus(signal)}\n\n"
             f"💰 <b>Precio: demasiado caro</b>\n"
             f"Mercado pide: <b>{best_edge['price']}</b>\n"
             f"Tope que vale pagar: {best_edge['max_price_worth_paying']}\n"
@@ -775,7 +892,10 @@ def poll_loop(market_id, current_round, topic):
 
     fee_rate = (topic.get("feeRateBps") or 200) / 10000
     recent_outcomes = load_recent_outcomes()
-    signal = check_streak_signal(recent_outcomes)
+    fired = collect_signals(recent_outcomes, get_pre_round_candles(round_start_ms), round_start_ms)
+    signal = pick_signal(fired)
+    if fired:
+        print(f"[señales] {len(fired)} activas: " + ", ".join(f"{s['name']}→{s['side']}" for s in fired))
     market_prob_up = _market_prob_up(current_round)
     alerted_this_round = False
     status_sent_this_round = False
@@ -803,14 +923,17 @@ def poll_loop(market_id, current_round, topic):
                 next_refresh_at = round_end_at - REFRESH_MARGIN_SECONDS
                 last_snapshot_ts, stale_repeats = None, 0
 
-                signal = check_streak_signal(recent_outcomes)
+                fired = collect_signals(recent_outcomes, get_pre_round_candles(round_start_ms), round_start_ms)
+                signal = pick_signal(fired)
                 market_prob_up = _market_prob_up(current_round)
                 alerted_this_round = False
                 status_sent_this_round = False
                 best_edge_this_round = None
                 bet_side = bet_reasoning = None
-                if signal is None:
-                    print(f"[sin señal] ultimas rondas: {' '.join(recent_outcomes[-4:])} -- sin racha, no se apuesta")
+                if fired:
+                    print(f"[señales] {len(fired)} activas: " + ", ".join(f"{s['name']}→{s['side']}" for s in fired))
+                else:
+                    print(f"[sin señal] ultimas rondas: {' '.join(recent_outcomes[-4:])} -- ninguna estrategia disparo")
 
             resp = get_order_book(market_id, vendor, token_id, condition_id)
             btc_price, price_gap_usd = log_snapshot(market_id, resp, round_start_price)
@@ -836,7 +959,7 @@ def poll_loop(market_id, current_round, topic):
                     alerted_this_round = True
                     bet_side = edge["side"]
                     bet_reasoning = (
-                        f"racha {signal['streak_len']}x {signal['streak_direction']}; "
+                        f"{signal['name']} ({signal['detail']}); "
                         f"{edge['side']} a {edge['price']} (tope {edge['max_price_worth_paying']}); EV {edge['ev']*100:+.1f}%"
                     )
                     lo68, hi68, lo90, hi90 = closing_range_bounds(round_start_price)
@@ -844,9 +967,10 @@ def poll_loop(market_id, current_round, topic):
                         f"VALOR: {edge['side']} a {edge['price']}",
                         f"🎯 <b>COMPRAR {edge['side'].upper()}</b> a <b>{edge['price']}</b>\n"
                         f"━━━━━━━━━━━━━━━━━━\n"
-                        f"📊 <b>Señal</b>\n"
-                        f"Racha: {signal['streak_len']}x {signal['streak_direction']} → reversión\n"
-                        f"Prob. estimada: {edge['q']*100:.1f}% <i>(límite inf. IC95%)</i>\n\n"
+                        f"📊 <b>Señal: {signal['name']}</b>\n"
+                        f"<i>{signal['detail']}</i>\n"
+                        f"Prob. estimada: {edge['q']*100:.1f}% <i>(límite inf. IC95%)</i>"
+                        f"{format_signal_consensus(signal)}\n\n"
                         f"💰 <b>Precio</b>\n"
                         f"Mercado pide: <b>{edge['price']}</b>\n"
                         f"Tope que vale pagar: {edge['max_price_worth_paying']}\n"

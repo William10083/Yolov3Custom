@@ -357,6 +357,41 @@ tienen niveles de evidencia muy diferentes:
 Igual que con las credenciales de Binance: **nunca pegues el token de
 Telegram en el chat** -- solo en tu terminal.
 
+0. **Las 8 señales que se evaluan** (`collect_signals`): no es solo
+   "rachas". Cada ronda se evalua contra las estrategias que superaron
+   breakeven en el backtest de 180 dias con la fee real de 2%, cada una
+   con su `q` = **limite inferior** de su IC95% out-of-sample:
+
+   | Estrategia | q | Que mira | Dispara en |
+   |---|---|---|---|
+   | `micro_mean_reversion_3m` | 52.2% | movimiento de BTC en los 3min previos | 61% de rondas |
+   | `volume_imbalance_contrarian_15m` | 51.9% | % de volumen que fue compra agresiva | 18% |
+   | `volume_imbalance_contrarian_3m` | 51.8% | idem, ventana 3min | 35% |
+   | `volume_imbalance_contrarian_5m` | 51.8% | idem, ventana 5min | 28% |
+   | `micro_mean_reversion_1m` | 51.7% | movimiento en 1min previo | 40% |
+   | `micro_mean_reversion_5m` | 51.3% | movimiento en 5min previos | 68% |
+   | `streak_reversion_3` | 51.1% | 3 rondas iguales seguidas | ~12% |
+   | `contrarian_last_1` | 50.9% | resultado de la ronda anterior | ~100% |
+
+   Las de `micro_mean_reversion` y `volume_imbalance` usan **datos de
+   precio y flujo de ordenes previos a la ronda** -- informacion que la
+   app no muestra en ningun lado, a diferencia del porcentaje Up/Down.
+   Con las 8 conectadas, solo el **7.6%** de las rondas se queda sin
+   ninguna señal activa (antes, con solo rachas, era ~88%).
+
+   **Se usa la señal mas fuerte, nunca una mezcla.** Combinar señales
+   correlacionadas en un solo numero seria inventar una probabilidad que
+   ningun backtest midio -- todas capturan el mismo efecto de reversion
+   que detecto el variance-ratio test, asi que el acuerdo entre ellas
+   **no es evidencia independiente** y no se suma a `q`. El mensaje
+   muestra cuantas coinciden y cuantas van en contra, como contexto.
+
+   **Corregido:** `streak_reversion_4` y `_5` estaban en el alertador con
+   q inventadas de una corrida vieja. En el backtest corregido (open
+   price, fee 2%) su IC95% inferior **no** supera breakeven, asi que se
+   sacaron. `streak_reversion_3` tambien tenia q=0.520 cuando su limite
+   inferior real es 0.511 -- se estaba sobreestimando la ventaja.
+
 1. **Alerta de VALOR** (`compute_bet_edge`): el analisis de verdad. Decir
    "apostar Up porque el mercado marca 72% Up" no es analisis, es repetir
    la pantalla -- pagas 0.72 por algo que vale ~0.72, ventaja cero. La
