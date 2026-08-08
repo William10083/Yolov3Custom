@@ -82,6 +82,10 @@ REST_BASE = "https://api.binance.com"
 SIGN_MARKET_DATA_CALLS = True  # flip to False if these specific calls reject the signature
 POLL_INTERVAL_SECONDS = 5
 
+# One silent "nothing here" message per round (~288/day). Set
+# SEND_STATUS_EVERY_ROUND=0 to keep only the real opportunity alerts.
+SEND_STATUS_EVERY_ROUND = os.environ.get("SEND_STATUS_EVERY_ROUND", "1") != "0"
+
 LOG_FILE = os.path.join(os.path.dirname(__file__), "data", "live_odds_log.csv")
 DEBUG_LOG_FILE = os.path.join(os.path.dirname(__file__), "data", "raw_api_responses.jsonl")
 
@@ -501,10 +505,14 @@ def load_recent_outcomes(limit=10):
     return outcomes[-limit:]
 
 
-def send_telegram(html_body):
+def send_telegram(html_body, silent=False):
     """HTML parse_mode rather than Markdown: these messages are full of
     parentheses, dashes, underscores and $ signs, which Markdown silently
-    mangles or rejects outright."""
+    mangles or rejects outright.
+
+    `silent` maps to Telegram's disable_notification -- the routine
+    once-per-round status lands without sound or vibration, so only the
+    actual opportunities buzz the phone."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
     try:
@@ -515,6 +523,7 @@ def send_telegram(html_body):
                 "text": html_body,
                 "parse_mode": "HTML",
                 "disable_web_page_preview": "true",
+                "disable_notification": "true" if silent else "false",
             },
             timeout=10,
         )
@@ -530,14 +539,16 @@ def _strip_html(text):
     return re.sub(r"<[^>]+>", "", text).replace("&amp;", "&")
 
 
-def send_notification(title, html_body):
+def send_notification(title, html_body, silent=False):
     """Alerts via three independent channels -- console (always), Telegram
     (if TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID are set) and termux-notification
     (if available). Never raises -- a missing/broken channel must not
     interrupt the polling loop; each is wrapped so the others still fire."""
     plain = _strip_html(html_body)
     print(f"\n{'=' * 60}\n{plain}\n{'=' * 60}\n")
-    send_telegram(html_body)
+    send_telegram(html_body, silent=silent)
+    if silent:
+        return  # routine status: Telegram + console are enough, don't buzz twice
     try:
         import subprocess
 
@@ -668,6 +679,45 @@ def compute_bet_edge(streak_signal, best_bid, best_ask, fee_rate, seconds_into_r
     }
 
 
+def build_status_message(market_id, signal, best_edge, recent_outcomes, btc_price, price_gap_usd, fee_rate):
+    """The once-per-round 'nothing to do here' summary. Sent silently, so it
+    confirms the bot is alive and shows WHY a round was skipped without
+    buzzing the phone for a non-event."""
+    header = f"⚪ <b>Sin oportunidad</b> · ronda <code>{market_id}</code>\n━━━━━━━━━━━━━━━━━━\n"
+
+    if signal is None:
+        ultimas = " ".join(recent_outcomes[-5:]) if recent_outcomes else "sin historial"
+        body = (
+            f"📊 <b>Señal</b>\nSin racha de 3+ iguales\n"
+            f"Últimas rondas: <code>{ultimas}</code>\n\n"
+            f"<i>La señal solo aplica tras 3-4 resultados iguales seguidos.</i>\n\n"
+        )
+    elif best_edge is None:
+        body = (
+            f"📊 <b>Señal</b>\nRacha {signal['streak_len']}x {signal['streak_direction']} → "
+            f"sugiere {signal['suggested_side']}\n\n"
+            f"⏱ <i>No se pudo evaluar el precio dentro de los primeros "
+            f"{MAX_SECONDS_INTO_ROUND_TO_BET}s (sin libro de órdenes a tiempo).</i>\n\n"
+        )
+    else:
+        body = (
+            f"📊 <b>Señal</b>\nRacha {signal['streak_len']}x {signal['streak_direction']} → "
+            f"sugiere {best_edge['side']}\n"
+            f"Prob. estimada: {best_edge['q']*100:.1f}%\n\n"
+            f"💰 <b>Precio: demasiado caro</b>\n"
+            f"Mercado pide: <b>{best_edge['price']}</b>\n"
+            f"Tope que vale pagar: {best_edge['max_price_worth_paying']}\n"
+            f"Ventaja (EV): <b>{best_edge['ev']*100:+.1f}%</b> <i>(fee {fee_rate*100:.1f}% incluida)</i>\n\n"
+            f"<i>El mercado ya tiene la reversión en el precio. No hay margen.</i>\n\n"
+        )
+
+    btc_line = ""
+    if btc_price is not None:
+        btc_line = f"₿ ${btc_price:,.2f} · {fmt_gap(price_gap_usd)} desde apertura\n"
+
+    return header + body + btc_line + f"📋 {compute_running_accuracy()}"
+
+
 def closing_range_bounds(round_start_price):
     """68%/90% bands around the round's opening price, from the historical
     5-minute volatility measured in option_edge_analysis.py. A spread of
@@ -728,6 +778,8 @@ def poll_loop(market_id, current_round, topic):
     signal = check_streak_signal(recent_outcomes)
     market_prob_up = _market_prob_up(current_round)
     alerted_this_round = False
+    status_sent_this_round = False
+    best_edge_this_round = None
     bet_side = bet_reasoning = None
 
     while True:
@@ -754,6 +806,8 @@ def poll_loop(market_id, current_round, topic):
                 signal = check_streak_signal(recent_outcomes)
                 market_prob_up = _market_prob_up(current_round)
                 alerted_this_round = False
+                status_sent_this_round = False
+                best_edge_this_round = None
                 bet_side = bet_reasoning = None
                 if signal is None:
                     print(f"[sin señal] ultimas rondas: {' '.join(recent_outcomes[-4:])} -- sin racha, no se apuesta")
@@ -776,6 +830,8 @@ def poll_loop(market_id, current_round, topic):
                         f"[edge] {edge['side']} a {edge['price']} | tope que vale pagar: "
                         f"{edge['max_price_worth_paying']} | EV {edge['ev']*100:+.1f}%"
                     )
+                    if best_edge_this_round is None or edge["ev"] > best_edge_this_round["ev"]:
+                        best_edge_this_round = edge
                 if edge and edge["worth_it"] and not alerted_this_round:
                     alerted_this_round = True
                     bet_side = edge["side"]
@@ -803,6 +859,25 @@ def poll_loop(market_id, current_round, topic):
                         f"90%: ${lo90:,.0f} – ${hi90:,.0f}\n\n"
                         f"⚠️ <i>EV no incluye price impact</i>\n"
                         f"📋 {compute_running_accuracy()}",
+                    )
+
+                # Betting window closed with nothing worth taking: say so once,
+                # silently, so a quiet round is visibly "checked and skipped"
+                # rather than indistinguishable from a dead script.
+                if (
+                    SEND_STATUS_EVERY_ROUND
+                    and not alerted_this_round
+                    and not status_sent_this_round
+                    and seconds_into_round > MAX_SECONDS_INTO_ROUND_TO_BET
+                ):
+                    status_sent_this_round = True
+                    send_notification(
+                        f"Ronda {market_id}: sin oportunidad",
+                        build_status_message(
+                            market_id, signal, best_edge_this_round, recent_outcomes,
+                            btc_price, price_gap_usd, fee_rate,
+                        ),
+                        silent=True,
                     )
 
                 if snapshot_ts is not None and snapshot_ts == last_snapshot_ts:

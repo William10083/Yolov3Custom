@@ -400,7 +400,18 @@ Telegram en el chat** -- solo en tu terminal.
    incluye el segundo exacto en que disparo y el precio de BTC en ese
    momento, para que se pueda auditar que no quedo pegado en un valor.
 
-2. **Resultado de cada ronda, cuando resuelve** (`log_round_outcome`):
+2. **Resumen de ronda sin oportunidad** (`build_status_message`): como la
+   mayoria de las rondas no dispara nada, un silencio largo es
+   indistinguible de un script muerto. Asi que cada ronda que se descarta
+   manda igual un mensaje **silencioso** (`disable_notification` de
+   Telegram: llega sin sonido ni vibracion) explicando *por que* se
+   descarto -- si no habia racha, o si la habia pero el mercado ya tenia
+   la reversion en el precio (con el EV negativo concreto). Solo las
+   oportunidades reales suenan; asi el ruido de fondo no compite con la
+   alerta que importa. Se apaga con `export SEND_STATUS_EVERY_ROUND=0`
+   si molestan las ~288 notificaciones silenciosas por dia.
+
+3. **Resultado de cada ronda, cuando resuelve** (`log_round_outcome`):
    compara la prediccion contra el resultado real y manda ACERTO/FALLO,
    mas la precision acumulada de las ultimas 50 predicciones evaluadas
    (`compute_running_accuracy`). Esto es honesto y verificable -- vas a
