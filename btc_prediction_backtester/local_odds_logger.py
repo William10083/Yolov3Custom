@@ -164,19 +164,19 @@ def find_btc_5m_market():
     resp = api_get("/sapi/v1/w3w/wallet/prediction/market/list", {"limit": 50})
     if resp.status_code != 200:
         print("market/list no respondio 200. Revisa el error de arriba.")
-        return None, None
+        return None, None, None
 
     try:
         data = resp.json()
     except ValueError:
         print("Respuesta no es JSON valido:", resp.text[:500])
-        return None, None
+        return None, None, None
 
     topics = data.get("marketTopics") if isinstance(data, dict) else None
     if not isinstance(topics, list):
         print("No encontre 'marketTopics' en la respuesta. JSON crudo:")
         print(json.dumps(data, indent=2)[:3000])
-        return None, None
+        return None, None, None
 
     topic = None
     for t in topics:
@@ -189,7 +189,7 @@ def find_btc_5m_market():
         print(f"No encontre un topic 'BTC Up or Down' entre {len(topics)} topics devueltos.")
         titles = [t.get("title") for t in topics if isinstance(t, dict)]
         print("Titulos disponibles:", titles)
-        return None, None
+        return None, None, None
 
     fee_bps = topic.get("feeRateBps")
     slippage_bps = topic.get("slippageBps")
@@ -201,7 +201,7 @@ def find_btc_5m_market():
     if not isinstance(markets, list) or not markets:
         print("El topic no trae una lista 'markets' con la ronda actual. JSON crudo del topic:")
         print(json.dumps(topic, indent=2)[:3000])
-        return None, None
+        return None, None, None
 
     current_round = markets[0]
     market_id = current_round.get("marketId")
