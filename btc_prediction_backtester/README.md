@@ -81,6 +81,83 @@ identico, y vale aclararlo en vez de asumirlo.
   ese momento (mediana corriente con dos heaps, O(log n), sigue siendo
   walk-forward).
 
+## ⛔ Conclusion final: el mercado esta bien cotizado y no hay ventaja que sacar
+
+Con 6,981 snapshots de cuotas reales y 153 rondas resueltas
+(`analyze_live_data.py`), se pudo por fin responder la pregunta que el
+backtest historico era estructuralmente incapaz de contestar, porque nunca
+tuvo cuotas. La respuesta cierra el proyecto.
+
+### El mercado acierta sus propias probabilidades
+
+| Precio del mercado | n | Up real | Error |
+|---|---|---|---|
+| 0.00 | 371 | 0.3% | +0.3pp |
+| 0.20 | 372 | 20.7% | +0.7pp |
+| 0.30 | 387 | 27.9% | −2.1pp |
+| 0.50 | 996 | 54.8% | +4.8pp |
+| 0.70 | 494 | 75.7% | +5.7pp |
+| 0.90 | 656 | 95.4% | +5.4pp |
+| 1.00 | 387 | 99.7% | −0.3pp |
+
+**Error medio: 5.4pp**, y buena parte es artefacto de la muestra: en este
+periodo Up salio 82/153 = 53.6%, lo que ya mete un sesgo de +3.6pp en
+todos los buckets. En los extremos (0.00, 0.20, 1.00) el mercado es casi
+exacto.
+
+*Salvedad importante:* los 6,000 snapshots **no son independientes** --
+salen de ~153 rondas, con ~40 snapshots cada una que comparten el mismo
+resultado. La muestra efectiva es 153, no 6,000, asi que los dos buckets
+marcados "DESVIADO" no son confiables.
+
+### Nuestro modelo de valor justo es el que esta mal, no el mercado
+
+La prueba 3 midio la diferencia entre el precio del mercado y nuestro
+`naive_fair_prob`: **desvio de 24.9pp, con 67.8% de los snapshots
+difiriendo mas de 10pp**.
+
+Cruzando con la prueba 1, la lectura es inequivoca: el precio del mercado
+predice los resultados con 5.4pp de error, y difiere del nuestro en 25pp.
+**El equivocado es el nuestro.** Y sobre ese valor justo roto se construyo
+todo el calculo de EV, incluida la regla `q = valor_justo + ventaja` y el
+filtro de "referencia sospechosa" -- que terminaba descartando rondas por
+nuestro propio error y apostando en las que ese error casualmente era
+chico, no en las que habia ventaja.
+
+### Seleccion adversa, confirmada con datos propios
+
+| Precio pagado | n | Acierto | IC95% |
+|---|---|---|---|
+| 0.45 | 32 | **28.1%** | [15.6%, 45.4%] |
+| 0.50 | 22 | **50.0%** | [30.7%, 69.3%] |
+
+Pagando barato acertamos 28%; pagando el precio justo, exactamente 50%.
+22 puntos de diferencia, en la direccion exacta que predice la teoria:
+**te llenan barato justo cuando el otro lado tiene razon**. Es el mismo
+mecanismo que un estudio publicado de trading real en Polymarket
+identifico como lo que mata a esta estrategia.
+
+### El libro no era el problema principal
+
+Spread mediano de 0.010 (un centavo), 16.4% de snapshots con spread mayor
+a 0.04, 9.3% sin una de las dos puntas. Peor que un mercado profundo, pero
+la hipotesis de "libro vacio" estaba sobredimensionada: la mayoria de las
+cuotas eran usables. El problema era el modelo, no el dato.
+
+### Veredicto
+
+El mercado esta eficientemente cotizado a este horizonte. No tenemos
+ninguna estimacion mejor que su propio precio, y cuando creimos tenerla
+resulto ser nuestro error de modelado. Sumado a la fee de 2% y a la
+seleccion adversa medida, **no hay forma de ganar sistematicamente
+apostando como taker en este mercado**. Ninguna variable adicional
+arregla eso: el problema no es que falte informacion, es que el precio
+ya la tiene.
+
+Lo que sirve de aca en adelante es el logger como herramienta de medicion
+-- que fue justamente lo que permitio llegar a esta conclusion con datos
+propios en vez de con intuicion.
+
 ## 🚨 Resultado en vivo: el sistema rinde POR DEBAJO del azar
 
 Las primeras 50 predicciones evaluadas en vivo dieron **16/50 (32%)**.
