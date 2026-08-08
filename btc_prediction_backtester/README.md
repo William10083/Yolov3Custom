@@ -81,6 +81,59 @@ identico, y vale aclararlo en vez de asumirlo.
   ese momento (mediana corriente con dos heaps, O(log n), sigue siendo
   walk-forward).
 
+## 🔬 El diagnostico exacto: la señal no estaba invertida, estaba vacia
+
+`win_loss_diagnosis.py` sobre las 62 apuestas reales separo dos
+explicaciones que hasta entonces se confundian.
+
+**Los controles salieron limpios:**
+
+- Rondas donde apostamos: **31 Up / 31 Down** -- exactamente 50/50.
+- Lados que elegimos: **30 Up / 32 Down** -- balanceado.
+
+Con ambas cosas balanceadas, tirar una moneda daria 50%. Obtuvimos
+**23/62 = 37.1%** (z = −2.03, p = 0.042). Asi que **no fue el sesgo del
+periodo** -- esa hipotesis queda descartada con datos, no con opinion.
+
+**Y ninguna caracteristica separa aciertos de fallos.** Se compararon 7:
+precio pagado, fuerza de la señal, EV declarado, movimiento de BTC, señal,
+lado apostado, resultado real. Cero con p<0.05, cuando el azar ya predice
+~0.4. No hay filtro que rescate esto.
+
+### Lo que si explica todo
+
+| Precio pagado | n | Acierto |
+|---|---|---|
+| 0.50 (justo) | 22 | **50.0%** |
+| 0.45 (barato) | 32 | **28.1%** |
+
+Pagando el precio justo, exactamente 50%: **la señal no aporta nada, ni a
+favor ni en contra.** Es ruido puro. Pagando por debajo, 28%: ese descuento
+no era una ganga, era el mercado avisando que estabamos del lado
+equivocado.
+
+Entonces la respuesta a "¿hay que invertir las señales?" es **no**. No
+estan invertidas -- estan vacias. Lo que estaba invertido era nuestra
+lectura: tomabamos un precio barato como oportunidad cuando era una
+advertencia. El filtro de precio convertia una señal neutra (50%) en una
+apuesta perdedora (37%).
+
+Eso tambien entierra la variante "invertida" que en `paper_pnl.py` daba
++$98: si la señal es neutra, invertirla sigue siendo neutra. Ese resultado
+era el reflejo de una racha, no un hallazgo.
+
+### El techo teorico
+
+Apostando siempre al precio justo, con la señal neutra:
+
+```
+50% de acierto x precio 0.50 x fee 2%  ->  EV = -2.0% por apuesta
+```
+
+El mejor escenario posible es **perder exactamente la comision**. No hay
+version de esto que gane, porque no hay nada que la señal sepa que el
+precio no sepa ya.
+
 ## ⛔ Conclusion final: el mercado esta bien cotizado y no hay ventaja que sacar
 
 Con 6,981 snapshots de cuotas reales y 153 rondas resueltas
