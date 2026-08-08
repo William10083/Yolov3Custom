@@ -81,6 +81,52 @@ identico, y vale aclararlo en vez de asumirlo.
   ese momento (mediana corriente con dos heaps, O(log n), sigue siendo
   walk-forward).
 
+## 🚨 Resultado en vivo: el sistema rinde POR DEBAJO del azar
+
+Las primeras 50 predicciones evaluadas en vivo dieron **16/50 (32%)**.
+
+Eso no es "no encontramos ventaja". Es 2.5 desviaciones estandar **por
+debajo** de tirar una moneda (z = −2.55, p = 0.0055). Con dinero real,
+seguir estas alertas estuvo perdiendo mas rapido que apostar al azar.
+
+**Que NO lo explica:** el regimen. Se reviso si las señales contrarian
+mueren en tendencia alcista (que es lo que hubo esas horas). En el
+backtest, `volume_imbalance_contrarian_15m` acierta 51.2% incluso en
+tendencia alcista fuerte, 53.5% en total. De 51% a 32% no hay puente.
+
+**Que si lo explica, al menos en parte:** el precio del libro de ordenes
+es basura en buena parte de las rondas. Precios de "Down" observados en
+rondas donde BTC **no se habia movido**:
+
+| BTC | Down cotizado | bid de Up |
+|---|---|---|
+| +$0.00 | 0.71 | 0.29 |
+| +$0.00 | 0.65 | 0.35 |
+| +$1.14 | 0.23 | 0.77 |
+| +$0.01 | 0.25 | 0.75 |
+| +$0.00 | 0.34 | 0.66 |
+| +$0.01 | 0.49 | 0.51 |
+
+El mismo estado produce precios entre 0.23 y 0.71 -- 48 puntos de rango.
+Ningun mercado racional hace eso. Al abrir la ronda el libro esta casi
+vacio y el "mejor bid" es una orden suelta cualquiera. Todo EV calculado
+sobre esos precios es aritmetica sobre ruido.
+
+**Filtros agregados** (`MAX_SPREAD_TO_TRUST`, `MIN_TOP_OF_BOOK_SIZE`,
+`MIN_Q_TO_BET`): descartan libro sin liquidez y bloquean comprar un lado
+con `q < 0.50` (comprabamos cosas que nosotros mismos esperabamos perder,
+solo porque el precio bajo hacia dar positivo el EV). Aplicados a las 4
+alertas que fallaron, bloquean 2 -- **las otras 2 siguen pasando**. Son
+mitigaciones parciales, no el arreglo.
+
+**Por eso `PAPER_MODE` viene activado por defecto.** Las alertas se
+registran y se etiquetan "no apostar", y llegan sin sonido. El contador de
+aciertos sigue corriendo. Se apaga con `export PAPER_MODE=0`, pero no
+tiene sentido hacerlo hasta que la precision en vivo vuelva a superar 50%
+sobre una muestra real.
+
+El contador de precision fue justamente lo que detecto esto. Funciono.
+
 ## ¿Conviene entrar mas tarde en la ronda? (`intraround_entry_analysis.py`)
 
 Pregunta razonable: el alertador solo mira los primeros 45 segundos. ¿No

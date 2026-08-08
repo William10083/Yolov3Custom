@@ -88,6 +88,15 @@ POLL_INTERVAL_SECONDS = 5
 # SEND_STATUS_EVERY_ROUND=0 to keep only the real opportunity alerts.
 SEND_STATUS_EVERY_ROUND = os.environ.get("SEND_STATUS_EVERY_ROUND", "1") != "0"
 
+# Observation mode, ON by default. The first 50 graded live predictions came in
+# at 32% (16/50) -- 2.5 standard deviations BELOW a coin flip, p=0.0055. That is
+# not "no edge found", it is evidence the signals are inverted under live
+# conditions, and the backtest gives no reason to expect it (51.2% even in
+# strong uptrends). Until live accuracy recovers above 50% on a real sample,
+# alerts are labelled as recorded-not-actionable.
+# Set PAPER_MODE=0 to present them as actionable again.
+PAPER_MODE = os.environ.get("PAPER_MODE", "1") != "0"
+
 LOG_FILE = os.path.join(os.path.dirname(__file__), "data", "live_odds_log.csv")
 DEBUG_LOG_FILE = os.path.join(os.path.dirname(__file__), "data", "raw_api_responses.jsonl")
 
@@ -276,6 +285,22 @@ def _best_bid_ask(order_book_json):
     best_bid = float(bids[0]["price"]) if bids else None
     best_ask = float(asks[0]["price"]) if asks else None
     return best_bid, best_ask
+
+
+def _book_depth(order_book_json):
+    """Size resting at the very top of each side.
+
+    A fresh round's book is often nearly empty, and then the 'best' price is
+    whatever lone order happens to sit there -- not a market price. Live data
+    showed Down quoted anywhere from 0.23 to 0.71 across rounds where BTC had
+    not moved at all, a 48-point spread for an identical state. Prices from a
+    book that thin cannot support an EV calculation.
+    """
+    bids = order_book_json.get("bids") or []
+    asks = order_book_json.get("asks") or []
+    bid_size = float(bids[0]["size"]) if bids else 0.0
+    ask_size = float(asks[0]["size"]) if asks else 0.0
+    return bid_size, ask_size
 
 
 def get_live_btc_price():
@@ -892,6 +917,20 @@ MAX_FAIR_VALUE_DISAGREEMENT = 0.10
 # 0.08 keeps us in roughly 0.42-0.58, the band where the model is honest.
 MAX_FAIR_DEVIATION_TO_BET = 0.08
 
+# A wide spread or a near-empty top of book means the quote is one stray
+# resting order, not a market price. Both guards exist because live data
+# showed Down quoted between 0.23 and 0.71 on rounds where BTC had not moved,
+# which is impossible for a real two-sided market and made every EV figure
+# computed off those quotes meaningless.
+MAX_SPREAD_TO_TRUST = 0.04
+MIN_TOP_OF_BOOK_SIZE = 20.0
+
+# Never buy a side we ourselves expect to lose. A price low enough can make
+# the EV arithmetic positive even when q < 0.5, but that is exactly where the
+# thin-book and fat-tail problems bite hardest, so it is not a bet worth
+# surfacing.
+MIN_Q_TO_BET = 0.50
+
 
 def _normal_cdf(x):
     return 0.5 * (1 + math.erf(x / math.sqrt(2)))
@@ -928,7 +967,15 @@ MAX_SECONDS_INTO_ROUND_TO_BET = 45
 
 
 def compute_bet_edge(
-    signal, best_bid, best_ask, fee_rate, seconds_into_round=0, round_start_price=None, btc_price=None
+    signal,
+    best_bid,
+    best_ask,
+    fee_rate,
+    seconds_into_round=0,
+    round_start_price=None,
+    btc_price=None,
+    bid_size=None,
+    ask_size=None,
 ):
     """The actual analysis: is the market's price CHEAP relative to our
     estimated probability?
@@ -987,6 +1034,18 @@ def compute_bet_edge(
     # measured, so the edge cannot be assumed to carry.
     move_too_far = abs(fair - 0.5) > MAX_FAIR_DEVIATION_TO_BET
 
+    # Quote quality. A round that has just opened frequently has almost no
+    # resting liquidity, and then "best bid" is a single stray order rather
+    # than a price. Any EV computed from it is arithmetic on noise.
+    spread = round(best_ask - best_bid, 4)
+    thin_book = (
+        spread > MAX_SPREAD_TO_TRUST
+        or (bid_size is not None and bid_size < MIN_TOP_OF_BOOK_SIZE)
+        or (ask_size is not None and ask_size < MIN_TOP_OF_BOOK_SIZE)
+    )
+
+    losing_side = q < MIN_Q_TO_BET
+
     ev = q * (1 - fee_rate) / price - 1
     return {
         "side": side,
@@ -996,10 +1055,19 @@ def compute_bet_edge(
         "ev": ev,
         "naive_fair": fair,
         "disagreement": disagreement,
+        "spread": spread,
         "reference_looks_wrong": reference_looks_wrong,
         "move_too_far": move_too_far,
+        "thin_book": thin_book,
+        "losing_side": losing_side,
         "max_price_worth_paying": round(q * (1 - fee_rate), 4),
-        "worth_it": ev >= MIN_EV_TO_ALERT and not reference_looks_wrong and not move_too_far,
+        "worth_it": (
+            ev >= MIN_EV_TO_ALERT
+            and not reference_looks_wrong
+            and not move_too_far
+            and not thin_book
+            and not losing_side
+        ),
     }
 
 
@@ -1041,6 +1109,26 @@ def build_status_message(market_id, signal, best_edge, recent_outcomes, btc_pric
             f"<i>{signal['detail']}</i>\n\n"
             f"⏱ <i>No se pudo evaluar el precio dentro de los primeros "
             f"{MAX_SECONDS_INTO_ROUND_TO_BET}s (sin libro de órdenes a tiempo).</i>\n\n"
+        )
+    elif best_edge.get("thin_book"):
+        body = (
+            f"📊 <b>Señal</b>\n{signal['name']} → sugiere {best_edge['side']}\n"
+            f"<i>{signal['detail']}</i>\n\n"
+            f"🚩 <b>Descartada: libro sin liquidez</b>\n"
+            f"Spread: {best_edge['spread']:.2f}\n\n"
+            f"<i>Con el libro casi vacío al abrir la ronda, el \"mejor precio\" es "
+            f"una orden suelta, no un precio de mercado. Calcular EV con eso es "
+            f"hacer cuentas sobre ruido.</i>\n\n"
+        )
+    elif best_edge.get("losing_side"):
+        body = (
+            f"📊 <b>Señal</b>\n{signal['name']} → sugiere {best_edge['side']}\n"
+            f"<i>{signal['detail']}</i>\n\n"
+            f"🚩 <b>Descartada: esperamos perder esta apuesta</b>\n"
+            f"Nuestra estimacion: {best_edge['q']*100:.1f}% <i>(por debajo de 50%)</i>\n\n"
+            f"<i>El precio bajo hace que el EV dé positivo, pero estaríamos "
+            f"comprando un lado que nosotros mismos creemos que pierde más veces "
+            f"de las que gana. No se apuesta ahí.</i>\n\n"
         )
     elif best_edge.get("move_too_far"):
         body = (
@@ -1193,12 +1281,15 @@ def poll_loop(market_id, current_round, topic):
                     body = resp.json()
                     snapshot_ts = body.get("timestamp")
                     best_bid, best_ask = _best_bid_ask(body)
+                    bid_size, ask_size = _book_depth(body)
                 except ValueError:
                     snapshot_ts, best_bid, best_ask = None, None, None
+                    bid_size = ask_size = None
 
                 seconds_into_round = time.time() - (round_start_ms / 1000)
                 edge = compute_bet_edge(
-                    signal, best_bid, best_ask, fee_rate, seconds_into_round, round_start_price, btc_price
+                    signal, best_bid, best_ask, fee_rate, seconds_into_round,
+                    round_start_price, btc_price, bid_size, ask_size,
                 )
                 if edge:
                     fair_txt = f"{edge['naive_fair']:.2f}" if edge["naive_fair"] is not None else "s/d"
@@ -1217,10 +1308,15 @@ def poll_loop(market_id, current_round, topic):
                         f"{edge['side']} a {edge['price']} (tope {edge['max_price_worth_paying']}); EV {edge['ev']*100:+.1f}%"
                     )
                     lo68, hi68, lo90, hi90 = closing_range_bounds(round_start_price)
+                    encabezado = (
+                        f"📝 <b>REGISTRADO (no apostar)</b>: {edge['side'].upper()} a <b>{edge['price']}</b>\n"
+                        f"<i>Modo observación — la precisión en vivo está por debajo del azar</i>\n"
+                        if PAPER_MODE
+                        else f"🎯 <b>COMPRAR {edge['side'].upper()}</b> a <b>{edge['price']}</b>\n"
+                    )
                     send_notification(
-                        f"VALOR: {edge['side']} a {edge['price']}",
-                        f"🎯 <b>COMPRAR {edge['side'].upper()}</b> a <b>{edge['price']}</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"{'Registrado' if PAPER_MODE else 'VALOR'}: {edge['side']} a {edge['price']}",
+                        encabezado + f"━━━━━━━━━━━━━━━━━━\n"
                         f"📊 <b>Señal: {signal['name']}</b>\n"
                         f"<i>{signal['detail']}</i>\n"
                         f"Prob. estimada: {edge['q']*100:.1f}% <i>(límite inf. IC95%)</i>"
@@ -1239,6 +1335,7 @@ def poll_loop(market_id, current_round, topic):
                         f"90%: ${lo90:,.0f} – ${hi90:,.0f}\n\n"
                         f"⚠️ <i>EV no incluye price impact</i>\n"
                         f"📋 {compute_running_accuracy()}",
+                        silent=PAPER_MODE,  # not actionable, so don't buzz for it
                     )
 
                 # Betting window closed with nothing worth taking: say so once,
