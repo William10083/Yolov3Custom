@@ -435,6 +435,47 @@ Telegram en el chat** -- solo en tu terminal.
    sacaron. `streak_reversion_3` tambien tenia q=0.520 cuando su limite
    inferior real es 0.511 -- se estaba sobreestimando la ventaja.
 
+   ### ⚠️ Correccion importante: la señal es una VENTAJA, no una probabilidad
+
+   La primera version de `compute_bet_edge` usaba `q` fijo (ej. 0.519) sin
+   importar el precio. Como `EV = q(1-f)/p - 1`, eso hacia que el EV
+   subiera **solo porque el precio bajaba** -- y el precio baja justo
+   cuando el mercado tiene informacion que la señal no tiene. Resultado:
+   el sistema se entusiasmaba mas cuanto mas en contra estaba la
+   evidencia. Selección adversa de manual.
+
+   Ejemplo real que lo destapó: una alerta de "COMPRAR DOWN a 0.31,
+   EV +64.1%". Con BTC apenas +$9 (0.1 sigma) a 7 segundos de iniciada la
+   ronda, el valor justo de Down era ~0.46. Que el mercado lo cotizara a
+   0.31 no era una ganga: era señal de que **el mercado y nosotros no
+   estabamos mirando el mismo precio de apertura**.
+
+   Dos arreglos:
+
+   - **`q` se ancla al precio del mercado.** El win rate del backtest se
+     midio al inicio de ronda, con el mercado cerca de 50/50 -- o sea, es
+     una ventaja de ~2pp **sobre el valor justo**, no una probabilidad
+     absoluta. Ahora `q = precio_mercado + (q_backtest - 0.5)`. El precio
+     del mercado es informacion real y se respeta.
+   - **Chequeo de coherencia** (`naive_fair_prob`): se compara el precio
+     del mercado contra el valor justo segun volatilidad historica. Si
+     difieren mas de 10 puntos, se descarta la ronda -- esa brecha indica
+     un problema de datos de nuestro lado (referencia desfasada), no una
+     oportunidad.
+
+   Recalculadas con el arreglo, las dos alertas reales que dispararon
+   antes quedan asi:
+
+   | Alerta | EV antes | EV ahora | Veredicto |
+   |---|---|---|---|
+   | Down a 0.49 (BTC +$0.00) | +3.8% | +1.8% | no alerta (bajo umbral) |
+   | Down a 0.31 (BTC +$9.05) | +64.1% | +4.0% | no alerta (referencia sospechosa, 15pp) |
+
+   Consecuencia practica: **las alertas van a ser bastante mas raras**.
+   Con una ventaja de ~2pp y fee 2%, hace falta que el mercado ofrezca
+   nuestro lado por debajo de ~0.47-0.54 segun la señal. Eso es correcto:
+   antes disparaba seguido porque el calculo estaba inflado.
+
 1. **Alerta de VALOR** (`compute_bet_edge`): el analisis de verdad. Decir
    "apostar Up porque el mercado marca 72% Up" no es analisis, es repetir
    la pantalla -- pagas 0.72 por algo que vale ~0.72, ventaja cero. La

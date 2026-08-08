@@ -51,6 +51,7 @@ import csv
 import hashlib
 import hmac
 import json
+import math
 import os
 import statistics
 import time
@@ -870,6 +871,40 @@ def _market_prob_up(current_round):
 
 MIN_EV_TO_ALERT = 0.02  # below this the "edge" is inside our own error bars
 
+# If the market's price and our own fair-value estimate disagree by more than
+# this, something is wrong with OUR inputs -- almost certainly a stale or
+# mismatched round-open reference, since the market's own reference comes from
+# Chainlink and ours from Binance klines. A large gap is a data problem
+# masquerading as free money, so skip rather than bet into it.
+MAX_FAIR_VALUE_DISAGREEMENT = 0.10
+
+
+def _normal_cdf(x):
+    return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+
+
+# Historical stdev of BTC moves by remaining minutes, from
+# option_edge_analysis.py's calibration over the 180-day dataset.
+_SIGMA_BY_REMAINING_MIN = {1: 0.0650, 2: 0.0920, 3: 0.1125, 4: 0.1295, 5: 0.1445}
+
+
+def naive_fair_prob(side, round_start_price, btc_price, seconds_into_round):
+    """What this side is worth given only the move so far and historical
+    volatility -- a zero-drift random walk estimate, the same model
+    option_edge_analysis.py showed is reasonably well calibrated.
+
+    Used as a cross-check on the market's price, not as a signal.
+    """
+    if not round_start_price or btc_price is None:
+        return None
+    remaining_min = max(1, min(5, math.ceil((ROUND_SECONDS - seconds_into_round) / 60)))
+    sigma_abs = round_start_price * _SIGMA_BY_REMAINING_MIN[remaining_min] / 100
+    if sigma_abs <= 0:
+        return None
+    z = (btc_price - round_start_price) / sigma_abs
+    p_up = _normal_cdf(z)
+    return p_up if side == "Up" else 1 - p_up
+
 # The backtest measured betting reversion AT THE ROUND'S START. Once BTC has
 # moved inside the round, that unconditional win rate no longer applies: a side
 # trading cheap late in a round is usually cheap because it is genuinely losing,
@@ -878,7 +913,9 @@ MIN_EV_TO_ALERT = 0.02  # below this the "edge" is inside our own error bars
 MAX_SECONDS_INTO_ROUND_TO_BET = 45
 
 
-def compute_bet_edge(signal, best_bid, best_ask, fee_rate, seconds_into_round=0):
+def compute_bet_edge(
+    signal, best_bid, best_ask, fee_rate, seconds_into_round=0, round_start_price=None, btc_price=None
+):
     """The actual analysis: is the market's price CHEAP relative to our
     estimated probability?
 
@@ -901,19 +938,35 @@ def compute_bet_edge(signal, best_bid, best_ask, fee_rate, seconds_into_round=0)
         return None
 
     side = signal["suggested_side"]
-    q = signal["q"]
     price = best_ask if side == "Up" else round(1 - best_bid, 4)
     if not 0 < price < 1:
         return None
+
+    # The signal's backtested win rate was measured at ROUND START, when the
+    # market sits near even money. It is an edge OVER fair value (~2pp), not a
+    # standalone probability. Treating it as absolute is what made a cheap
+    # price look like free money: with q pinned at 0.519, EV rose purely
+    # because p fell -- but p falls precisely when the market has information
+    # we don't. So anchor on the market's price and add only our measured edge.
+    edge_over_fair = signal["q"] - 0.5
+    q = min(0.99, max(0.01, price + edge_over_fair))
+
+    fair = naive_fair_prob(side, round_start_price, btc_price, seconds_into_round)
+    disagreement = abs(price - fair) if fair is not None else None
+    reference_looks_wrong = disagreement is not None and disagreement > MAX_FAIR_VALUE_DISAGREEMENT
 
     ev = q * (1 - fee_rate) / price - 1
     return {
         "side": side,
         "price": price,
         "q": q,
+        "edge_over_fair": edge_over_fair,
         "ev": ev,
+        "naive_fair": fair,
+        "disagreement": disagreement,
+        "reference_looks_wrong": reference_looks_wrong,
         "max_price_worth_paying": round(q * (1 - fee_rate), 4),
-        "worth_it": ev >= MIN_EV_TO_ALERT,
+        "worth_it": ev >= MIN_EV_TO_ALERT and not reference_looks_wrong,
     }
 
 
@@ -956,17 +1009,29 @@ def build_status_message(market_id, signal, best_edge, recent_outcomes, btc_pric
             f"⏱ <i>No se pudo evaluar el precio dentro de los primeros "
             f"{MAX_SECONDS_INTO_ROUND_TO_BET}s (sin libro de órdenes a tiempo).</i>\n\n"
         )
+    elif best_edge.get("reference_looks_wrong"):
+        body = (
+            f"📊 <b>Señal</b>\n{signal['name']} → sugiere {best_edge['side']}\n"
+            f"<i>{signal['detail']}</i>\n\n"
+            f"🚩 <b>Descartada: referencia sospechosa</b>\n"
+            f"Mercado pide: <b>{best_edge['price']}</b>\n"
+            f"Valor justo segun volatilidad: {best_edge['naive_fair']:.2f}\n"
+            f"Discrepancia: <b>{best_edge['disagreement']*100:.0f} puntos</b>\n\n"
+            f"<i>Una brecha así con BTC casi quieto significa que el mercado y "
+            f"nosotros no estamos mirando el mismo precio de apertura. Eso es un "
+            f"problema de datos, no una oportunidad.</i>\n\n"
+        )
     else:
         body = (
             f"📊 <b>Señal</b>\n{signal['name']} → sugiere {best_edge['side']}\n"
             f"<i>{signal['detail']}</i>\n"
             f"Prob. estimada: {best_edge['q']*100:.1f}%"
             f"{format_signal_consensus(signal)}\n\n"
-            f"💰 <b>Precio: demasiado caro</b>\n"
+            f"💰 <b>Precio: sin margen</b>\n"
             f"Mercado pide: <b>{best_edge['price']}</b>\n"
-            f"Tope que vale pagar: {best_edge['max_price_worth_paying']}\n"
+            f"Nuestra estimacion: {best_edge['q']:.3f}\n"
             f"Ventaja (EV): <b>{best_edge['ev']*100:+.1f}%</b> <i>(fee {fee_rate*100:.1f}% incluida)</i>\n\n"
-            f"<i>El mercado ya tiene la reversión en el precio. No hay margen.</i>\n\n"
+            f"<i>La ventaja de la señal no alcanza a cubrir la fee.</i>\n\n"
         )
 
     btc_line = ""
@@ -1088,11 +1153,15 @@ def poll_loop(market_id, current_round, topic):
                     snapshot_ts, best_bid, best_ask = None, None, None
 
                 seconds_into_round = time.time() - (round_start_ms / 1000)
-                edge = compute_bet_edge(signal, best_bid, best_ask, fee_rate, seconds_into_round)
+                edge = compute_bet_edge(
+                    signal, best_bid, best_ask, fee_rate, seconds_into_round, round_start_price, btc_price
+                )
                 if edge:
+                    fair_txt = f"{edge['naive_fair']:.2f}" if edge["naive_fair"] is not None else "s/d"
+                    flag = "  [REFERENCIA SOSPECHOSA]" if edge["reference_looks_wrong"] else ""
                     print(
-                        f"[edge] {edge['side']} a {edge['price']} | tope que vale pagar: "
-                        f"{edge['max_price_worth_paying']} | EV {edge['ev']*100:+.1f}%"
+                        f"[edge] {edge['side']} a {edge['price']} | valor justo {fair_txt} | "
+                        f"EV {edge['ev']*100:+.1f}%{flag}"
                     )
                     if best_edge_this_round is None or edge["ev"] > best_edge_this_round["ev"]:
                         best_edge_this_round = edge
@@ -1114,7 +1183,9 @@ def poll_loop(market_id, current_round, topic):
                         f"{format_signal_consensus(signal)}\n\n"
                         f"💰 <b>Precio</b>\n"
                         f"Mercado pide: <b>{edge['price']}</b>\n"
-                        f"Tope que vale pagar: {edge['max_price_worth_paying']}\n"
+                        f"Valor justo (volatilidad): {edge['naive_fair']:.2f}\n"
+                        f"Nuestra estimacion: {edge['q']:.3f} "
+                        f"<i>(mercado {edge['price']} + ventaja {edge['edge_over_fair']*100:+.1f}pp)</i>\n"
                         f"Ventaja (EV): <b>{edge['ev']*100:+.1f}%</b> <i>(fee {fee_rate*100:.1f}% ya descontada)</i>\n\n"
                         f"₿ <b>Bitcoin ahora</b>\n"
                         f"${btc_price:,.2f} · <b>{fmt_gap(price_gap_usd)}</b> desde apertura\n"
