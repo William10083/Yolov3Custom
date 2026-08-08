@@ -389,6 +389,8 @@ OUTCOMES_HEADER = [
     "predicted_side",
     "predicted_reasoning",
     "signal_correct",
+    "signal_name",
+    "entry_price",
 ]
 
 
@@ -441,6 +443,35 @@ def compute_running_accuracy(last_n=50):
     return f"Precision acumulada: {correct}/{total} ({correct/total*100:.1f}%) en las ultimas {total} predicciones."
 
 
+def accuracy_by_signal(min_samples=5):
+    """Which signal is actually failing.
+
+    The aggregate number says the system is losing; it cannot say which part.
+    This is the only kind of learning worth doing on a sample this size --
+    attributing outcomes to the signal that produced them. Adjusting weights
+    on a few dozen rounds would just be fitting noise.
+    """
+    if not os.path.exists(OUTCOMES_FILE):
+        return ""
+    with open(OUTCOMES_FILE, newline="") as f:
+        rows = list(csv.DictReader(f))
+
+    per_signal = {}
+    for r in rows:
+        if r.get("signal_correct") not in ("True", "False"):
+            continue
+        name = r.get("signal_name") or "(sin registrar)"
+        hits, total = per_signal.get(name, (0, 0))
+        per_signal[name] = (hits + (r["signal_correct"] == "True"), total + 1)
+
+    lines = []
+    for name, (hits, total) in sorted(per_signal.items(), key=lambda kv: -kv[1][1]):
+        if total < min_samples:
+            continue
+        lines.append(f"  {name}: {hits}/{total} ({hits/total*100:.0f}%)")
+    return "\n".join(lines)
+
+
 def resolve_round_outcome(round_start_ms, retries=10, delay_seconds=5):
     """Determine Up/Down for a finished round using the same public,
     unauthenticated Binance klines endpoint as data_fetch.py/backtest.py --
@@ -470,7 +501,15 @@ def resolve_round_outcome(round_start_ms, retries=10, delay_seconds=5):
     return None, None, None
 
 
-def log_round_outcome(market_id, round_start_ms, market_prob_up=None, predicted_side=None, predicted_reasoning=None):
+def log_round_outcome(
+    market_id,
+    round_start_ms,
+    market_prob_up=None,
+    predicted_side=None,
+    predicted_reasoning=None,
+    signal_name=None,
+    entry_price=None,
+):
     ensure_outcomes_file()
     round_end_ms = round_start_ms + ROUND_SECONDS * 1000
     start_price, end_price, outcome = resolve_round_outcome(round_start_ms)
@@ -493,6 +532,8 @@ def log_round_outcome(market_id, round_start_ms, market_prob_up=None, predicted_
                 predicted_side,
                 predicted_reasoning,
                 signal_correct,
+                signal_name,
+                entry_price,
             ]
         )
 
@@ -515,7 +556,8 @@ def log_round_outcome(market_id, round_start_ms, market_prob_up=None, predicted_
             f"{arrow} <b>Bitcoin</b>\n"
             f"${start_price:,.2f} → ${end_price:,.2f}\n"
             f"Cerró en <b>{fmt_gap(move)}</b>\n\n"
-            f"📋 {compute_running_accuracy()}",
+            f"📋 {compute_running_accuracy()}"
+            + (f"\n\n<b>Por señal:</b>\n<code>{por_senal}</code>" if (por_senal := accuracy_by_signal()) else ""),
         )
     return outcome
 
@@ -1238,13 +1280,16 @@ def poll_loop(market_id, current_round, topic):
     alerted_this_round = False
     status_sent_this_round = False
     best_edge_this_round = None
-    bet_side = bet_reasoning = None
+    bet_side = bet_reasoning = bet_signal_name = bet_entry_price = None
 
     while True:
         try:
             if time.time() >= next_refresh_at:
                 print("\n[rollover] fin de ronda esperado -- resolviendo resultado de la ronda anterior...")
-                outcome = log_round_outcome(market_id, round_start_ms, market_prob_up, bet_side, bet_reasoning)
+                outcome = log_round_outcome(
+                    market_id, round_start_ms, market_prob_up, bet_side, bet_reasoning,
+                    bet_signal_name, bet_entry_price,
+                )
                 if outcome in ("Up", "Down"):
                     recent_outcomes.append(outcome)
                     recent_outcomes = recent_outcomes[-10:]
@@ -1267,7 +1312,7 @@ def poll_loop(market_id, current_round, topic):
                 alerted_this_round = False
                 status_sent_this_round = False
                 best_edge_this_round = None
-                bet_side = bet_reasoning = None
+                bet_side = bet_reasoning = bet_signal_name = bet_entry_price = None
                 if fired:
                     print(f"[señales] {len(fired)} activas: " + ", ".join(f"{s['name']}→{s['side']}" for s in fired))
                 else:
@@ -1303,6 +1348,8 @@ def poll_loop(market_id, current_round, topic):
                 if edge and edge["worth_it"] and not alerted_this_round:
                     alerted_this_round = True
                     bet_side = edge["side"]
+                    bet_signal_name = signal["name"]
+                    bet_entry_price = edge["price"]
                     bet_reasoning = (
                         f"{signal['name']} ({signal['detail']}); "
                         f"{edge['side']} a {edge['price']} (tope {edge['max_price_worth_paying']}); EV {edge['ev']*100:+.1f}%"
