@@ -341,30 +341,55 @@ def log_snapshot(market_id, resp, round_start_price):
                 resp.text[:2000],
             ]
         )
+    return btc_price, price_gap_usd
 
 
 OUTCOMES_FILE = os.path.join(os.path.dirname(__file__), "data", "round_outcomes.csv")
 
 
+OUTCOMES_HEADER = [
+    "market_id",
+    "round_start_ms",
+    "round_end_ms",
+    "start_price",
+    "end_price",
+    "outcome",
+    "market_prob_up",
+    "predicted_side",
+    "predicted_reasoning",
+    "signal_correct",
+]
+
+
 def ensure_outcomes_file():
+    """Create the outcomes CSV, or migrate one written before the prediction
+    columns existed.
+
+    Without the migration, DictReader keys every row off the stale 6-column
+    header, so the 4 newer values (including signal_correct) land in the
+    restkey and are invisible -- which is why accuracy kept reporting "no
+    graded predictions yet" even right after grading one.
+    """
     os.makedirs(os.path.dirname(OUTCOMES_FILE), exist_ok=True)
     if not os.path.exists(OUTCOMES_FILE):
         with open(OUTCOMES_FILE, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(
-                [
-                    "market_id",
-                    "round_start_ms",
-                    "round_end_ms",
-                    "start_price",
-                    "end_price",
-                    "outcome",
-                    "market_prob_up",
-                    "predicted_side",
-                    "predicted_reasoning",
-                    "signal_correct",
-                ]
-            )
+            csv.writer(f).writerow(OUTCOMES_HEADER)
+        return
+
+    with open(OUTCOMES_FILE, newline="") as f:
+        rows = list(csv.reader(f))
+    if not rows:
+        with open(OUTCOMES_FILE, "w", newline="") as f:
+            csv.writer(f).writerow(OUTCOMES_HEADER)
+        return
+    if rows[0] == OUTCOMES_HEADER:
+        return
+
+    width = len(OUTCOMES_HEADER)
+    migrated = [OUTCOMES_HEADER] + [r + [""] * (width - len(r)) for r in rows[1:] if len(r) <= width]
+    with open(OUTCOMES_FILE, "w", newline="") as f:
+        csv.writer(f).writerows(migrated)
+    print(f"[migracion] round_outcomes.csv actualizado a {width} columnas ({len(migrated)-1} filas conservadas)")
 
 
 def compute_running_accuracy(last_n=50):
@@ -446,12 +471,20 @@ def log_round_outcome(market_id, round_start_ms, market_prob_up=None, predicted_
         print(f"[outcome] market_id={market_id} -> no se pudo resolver (klines no disponibles todavia)")
 
     if predicted_side and outcome in ("Up", "Down"):
-        result_text = "ACERTO" if signal_correct else "FALLO"
+        icon = "✅" if signal_correct else "❌"
+        result_text = "ACERTÓ" if signal_correct else "FALLÓ"
+        move = end_price - start_price
+        arrow = "📈" if move >= 0 else "📉"
         send_notification(
-            f"Ronda {market_id} resuelta: {result_text}",
-            f"Predijimos {predicted_side} ({predicted_reasoning})\n"
-            f"Resultado real: {outcome} (${start_price:,.2f} -> ${end_price:,.2f})\n"
-            f"{compute_running_accuracy()}",
+            f"Ronda {market_id}: {result_text}",
+            f"{icon} <b>{result_text}</b> · ronda <code>{market_id}</code>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"Predijimos: <b>{predicted_side}</b>\n"
+            f"Resultado:  <b>{outcome}</b>\n\n"
+            f"{arrow} <b>Bitcoin</b>\n"
+            f"${start_price:,.2f} → ${end_price:,.2f}\n"
+            f"Cerró en <b>{fmt_gap(move)}</b>\n\n"
+            f"📋 {compute_running_accuracy()}",
         )
     return outcome
 
@@ -468,36 +501,61 @@ def load_recent_outcomes(limit=10):
     return outcomes[-limit:]
 
 
-def send_telegram(title, content):
+def send_telegram(html_body):
+    """HTML parse_mode rather than Markdown: these messages are full of
+    parentheses, dashes, underscores and $ signs, which Markdown silently
+    mangles or rejects outright."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
     try:
-        requests.post(
+        resp = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            data={"chat_id": TELEGRAM_CHAT_ID, "text": f"*{title}*\n{content}", "parse_mode": "Markdown"},
+            data={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": html_body,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": "true",
+            },
             timeout=10,
         )
+        if resp.status_code != 200:
+            print(f"[telegram-error] {resp.status_code} {resp.text[:200]}")
     except Exception as exc:
         print(f"[telegram-error] {exc}")
 
 
-def send_notification(title, content):
+def _strip_html(text):
+    import re
+
+    return re.sub(r"<[^>]+>", "", text).replace("&amp;", "&")
+
+
+def send_notification(title, html_body):
     """Alerts via three independent channels -- console (always), Telegram
     (if TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID are set) and termux-notification
     (if available). Never raises -- a missing/broken channel must not
     interrupt the polling loop; each is wrapped so the others still fire."""
-    print(f"\n{'=' * 60}\n[ALERTA] {title}\n{content}\n{'=' * 60}\n")
-    send_telegram(title, content)
+    plain = _strip_html(html_body)
+    print(f"\n{'=' * 60}\n{plain}\n{'=' * 60}\n")
+    send_telegram(html_body)
     try:
         import subprocess
 
         subprocess.run(
-            ["termux-notification", "--title", title, "--content", content],
+            ["termux-notification", "--title", title, "--content", plain[:400]],
             timeout=5,
             check=False,
         )
     except Exception:
         pass  # no termux-api installed, or not on Termux -- console/telegram alerts still fire
+
+
+def fmt_gap(gap):
+    """The app shows the round's move as a signed dollar figure (e.g.
+    "-$1.54"); mirror that exactly so the alert and the screen agree."""
+    if gap is None:
+        return "s/d"
+    return f"+${gap:,.2f}" if gap >= 0 else f"-${abs(gap):,.2f}"
 
 
 # Streak-reversion win rates from backtest.py's 180-day run at the REAL
@@ -610,13 +668,18 @@ def compute_bet_edge(streak_signal, best_bid, best_ask, fee_rate, seconds_into_r
     }
 
 
-def format_closing_range(round_start_price):
+def closing_range_bounds(round_start_price):
+    """68%/90% bands around the round's opening price, from the historical
+    5-minute volatility measured in option_edge_analysis.py. A spread of
+    plausible closes, never a point forecast."""
     if not round_start_price:
-        return ""
+        return 0, 0, 0, 0
     one_sigma = round_start_price * ROUND_SIGMA_5MIN_PCT / 100
     return (
-        f"Cierre probable: ${round_start_price - one_sigma:,.0f}-${round_start_price + one_sigma:,.0f} (68%) | "
-        f"${round_start_price - 1.645 * one_sigma:,.0f}-${round_start_price + 1.645 * one_sigma:,.0f} (90%)"
+        round_start_price - one_sigma,
+        round_start_price + one_sigma,
+        round_start_price - 1.645 * one_sigma,
+        round_start_price + 1.645 * one_sigma,
     )
 
 
@@ -696,7 +759,7 @@ def poll_loop(market_id, current_round, topic):
                     print(f"[sin señal] ultimas rondas: {' '.join(recent_outcomes[-4:])} -- sin racha, no se apuesta")
 
             resp = get_order_book(market_id, vendor, token_id, condition_id)
-            log_snapshot(market_id, resp, round_start_price)
+            btc_price, price_gap_usd = log_snapshot(market_id, resp, round_start_price)
             if resp.status_code == 200:
                 print(f"[snapshot] {resp.text[:300]}")
                 try:
@@ -720,15 +783,26 @@ def poll_loop(market_id, current_round, topic):
                         f"racha {signal['streak_len']}x {signal['streak_direction']}; "
                         f"{edge['side']} a {edge['price']} (tope {edge['max_price_worth_paying']}); EV {edge['ev']*100:+.1f}%"
                     )
+                    lo68, hi68, lo90, hi90 = closing_range_bounds(round_start_price)
                     send_notification(
                         f"VALOR: {edge['side']} a {edge['price']}",
-                        f"Racha de {signal['streak_len']}x {signal['streak_direction']} -> senal historica "
-                        f"{edge['q']*100:.1f}% {edge['side']} (limite inferior IC95%, conservador)\n"
-                        f"El mercado lo vende a {edge['price']}; solo vale la pena por debajo de "
-                        f"{edge['max_price_worth_paying']} (ya descontada la fee de {fee_rate*100:.1f}%)\n"
-                        f"Ventaja estimada: {edge['ev']*100:+.1f}% -- NO incluye price impact, que puede comerselo\n"
-                        f"{format_closing_range(round_start_price)}\n"
-                        f"{compute_running_accuracy()}",
+                        f"🎯 <b>COMPRAR {edge['side'].upper()}</b> a <b>{edge['price']}</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"📊 <b>Señal</b>\n"
+                        f"Racha: {signal['streak_len']}x {signal['streak_direction']} → reversión\n"
+                        f"Prob. estimada: {edge['q']*100:.1f}% <i>(límite inf. IC95%)</i>\n\n"
+                        f"💰 <b>Precio</b>\n"
+                        f"Mercado pide: <b>{edge['price']}</b>\n"
+                        f"Tope que vale pagar: {edge['max_price_worth_paying']}\n"
+                        f"Ventaja (EV): <b>{edge['ev']*100:+.1f}%</b> <i>(fee {fee_rate*100:.1f}% ya descontada)</i>\n\n"
+                        f"₿ <b>Bitcoin ahora</b>\n"
+                        f"${btc_price:,.2f} · <b>{fmt_gap(price_gap_usd)}</b> desde apertura\n"
+                        f"<i>({int(seconds_into_round)}s dentro de la ronda)</i>\n\n"
+                        f"📈 <b>Cierre probable</b>\n"
+                        f"68%: ${lo68:,.0f} – ${hi68:,.0f}\n"
+                        f"90%: ${lo90:,.0f} – ${hi90:,.0f}\n\n"
+                        f"⚠️ <i>EV no incluye price impact</i>\n"
+                        f"📋 {compute_running_accuracy()}",
                     )
 
                 if snapshot_ts is not None and snapshot_ts == last_snapshot_ts:

@@ -394,16 +394,36 @@ Telegram en el chat** -- solo en tu terminal.
    primeros 45 segundos** (`MAX_SECONDS_INTO_ROUND_TO_BET`), mientras la
    premisa del backtest todavia se sostiene.
 
+   La alerta dispara en el **primer** precio aceptable de la ventana, no
+   en el mejor de los 45s: esperar un precio mejor seria alejarse de la
+   premisa que el backtest midio (apostar al inicio). Cada mensaje
+   incluye el segundo exacto en que disparo y el precio de BTC en ese
+   momento, para que se pueda auditar que no quedo pegado en un valor.
+
 2. **Resultado de cada ronda, cuando resuelve** (`log_round_outcome`):
    compara la prediccion contra el resultado real y manda ACERTO/FALLO,
    mas la precision acumulada de las ultimas 50 predicciones evaluadas
    (`compute_running_accuracy`). Esto es honesto y verificable -- vas a
    ver en vivo si el ~53% del backtest se sostiene o no.
 
+Los mensajes van en **HTML de Telegram** (no Markdown: el texto tiene
+parentesis, guiones y `$`, que Markdown rompe silenciosamente), con
+secciones separadas y el movimiento de BTC en dolares con signo
+(`+$31.40` / `-$41.40`) igual que lo muestra la app. En consola se
+imprime la misma info sin las etiquetas.
+
 Se elimino la alerta de "spread angosto" que existia antes: disparaba
 constantemente, no predecia nada, y ensuciaba el canal. El spread igual
 esta contemplado donde importa -- el precio que usa el calculo de EV es
 el `ask` real del libro (lo que de verdad pagarias), no el punto medio.
+
+**Migracion del CSV:** `round_outcomes.csv` paso de 6 a 10 columnas al
+agregarse las de prediccion. `ensure_outcomes_file()` detecta y migra
+archivos viejos automaticamente -- sin eso, `DictReader` leia las filas
+nuevas contra el header viejo, las 4 columnas extra caian en el restkey
+y `signal_correct` era invisible, por lo que la precision reportaba
+"sin predicciones evaluadas" para siempre aunque hubiera aciertos
+registrados.
 
 **Importante:** esto no es un sistema que "aprende" ni se auto-ajusta.
 Con la poca muestra que este script puede juntar en la practica (decenas
