@@ -60,7 +60,36 @@ rondas. Usando el limite inferior del IC, el precio maximo pagable es
 con el modelo, cobra ~0.56 y no queda nada.
 
 `market_vs_model.py` contesta eso con los precios que ya se recolectaron en
-`round_outcomes.csv`. Es la unica pregunta abierta del proyecto.
+`round_outcomes.csv`.
+
+### Primera corrida contra precios reales (133 rondas, 08-Ago)
+
+| | |
+|---|---|
+| Confianza media del modelo | 57.1% |
+| Precio medio cobrado por el mercado | **0.509** |
+| Correlacion modelo ↔ precio (133 rondas) | **−0.020**, IC95% [−0.19, +0.15] |
+| Diferencia media \|modelo − mercado\| | 8.6 pp |
+| Acierto en las 17 rondas de confianza | 8/17 = 47.1%, IC95% [26.2%, 69.0%] |
+
+**El mercado no esta cotizando esto.** Cobro 0.509 donde el modelo tenia
+57.1% de conviccion, lo que baja el breakeven de ~58% a **51.9%**. La
+objecion que parecia decisiva -- "el mercado ve las mismas velas y va a
+cobrar la ventaja por adelantado" -- no se sostiene en estos datos. La
+correlacion va sobre las 133 rondas, no sobre las 17, asi que esta bien
+medida y el intervalo descarta cualquier relacion fuerte.
+
+**Las 17 rondas no dicen nada en ninguna direccion.** P(≤8 aciertos de 17 |
+el modelo acierta 54.5%) = 0.353. Ver 8/17 es perfectamente compatible con
+que el modelo funcione tal cual dice. El ROI de −14.4% es la misma nada con
+signo, y la "quiebra en la ronda #3" es artefacto de apostar $10 con banca
+de $10.
+
+**Lo que cuesta saberlo de verdad:** separar 54.5% de un breakeven de 51.9%
+(brecha de 2.6 pp) exige ~1,400 rondas de confianza. A un 13% de disparo son
+~10,800 rondas totales, o **~38 dias de logging continuo**. Ese es el numero
+honesto. Una version anterior de este script decia "~400 rondas alcanza" --
+estaba mal y ya esta corregido.
 
 ### Como usarlo
 
@@ -79,6 +108,17 @@ en ~93% de las rondas: forzar una opinion siempre es justamente lo que baja
 el acierto de 54.5% a 50.7%. Cuando si se pronuncia, muestra que features
 empujaron la decision (peso x valor estandarizado, no solo el peso) y el
 precio maximo pagable.
+
+Ademas **anota cada llamada firme en `predictions_log.csv` antes de que la
+ronda resuelva**, y califica sola las pendientes en cada corrida. Eso es lo
+que hace que los 38 dias sirvan: una prediccion escrita despues del hecho se
+puede reinterpretar, una escrita antes no. Todo lo que se probo en este repo
+y despues se cayo, se cayo por elegir la regla despues de ver el resultado.
+
+Solo anota si la llamada es firme: la ventana es de 5 s antes a 60 s despues
+del borde de ronda. Antes de eso la lectura todavia puede cambiar, y despues
+el precio actual ya es la ronda en curso -- informacion que el modelo no
+deberia tener.
 
 **Nada de esto es permiso para apostar.** Es la primera cosa del proyecto que
 paso todos los filtros, y sigue faltando el filtro que mas importa.

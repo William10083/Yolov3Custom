@@ -22,6 +22,7 @@ Lo importante de como funciona:
     python3 predict_next.py --loop    # se queda prediciendo cada ronda
 """
 import argparse
+import csv
 import json
 import math
 import os
@@ -34,6 +35,11 @@ import predict_model as pm
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL = os.path.join(HERE, "model.json")
+LOG = os.path.join(HERE, "predictions_log.csv")
+LOG_HEADER = [
+    "logged_at_ms", "round_start_ms", "side", "confidence",
+    "btc_at_prediction", "outcome", "correct",
+]
 KLINES = "https://data-api.binance.vision/api/v3/klines"
 TICKER = "https://data-api.binance.vision/api/v3/ticker/price"
 SYMBOL = "BTCUSDT"
@@ -115,6 +121,118 @@ NOMBRES = {
 }
 
 
+def read_log():
+    if not os.path.exists(LOG):
+        return []
+    with open(LOG, newline="") as f:
+        rows = list(csv.reader(f))
+    if not rows:
+        return []
+    body = rows[1:] if rows[0] and rows[0][0] == LOG_HEADER[0] else rows
+    out = []
+    for r in body:
+        if not r:
+            continue
+        d = dict.fromkeys(LOG_HEADER, "")
+        for i, v in enumerate(r):
+            if i < len(LOG_HEADER):
+                d[LOG_HEADER[i]] = v
+        out.append(d)
+    return out
+
+
+def write_log(rows):
+    with open(LOG, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(LOG_HEADER)
+        for r in rows:
+            w.writerow([r.get(k, "") for k in LOG_HEADER])
+
+
+def record(round_start_ms, side, conf, price):
+    """Write the call BEFORE the round resolves.
+
+    This is the whole point of the file. A prediction written down after the
+    fact can be reinterpreted; one written down first cannot. Everything
+    measured in this repo that later fell apart fell apart because the rule
+    was chosen after seeing the outcome.
+    """
+    rows = read_log()
+    if any(r["round_start_ms"] == str(round_start_ms) for r in rows):
+        return
+    rows.append({
+        "logged_at_ms": int(time.time() * 1000),
+        "round_start_ms": round_start_ms,
+        "side": side,
+        "confidence": f"{conf:.4f}",
+        "btc_at_prediction": f"{price:.2f}",
+        "outcome": "",
+        "correct": "",
+    })
+    write_log(rows)
+
+
+def grade_pending():
+    """Resolve any logged prediction whose round has already finished.
+
+    Uses the same rule the market uses and the backtest used: the OPEN of the
+    candle at the round's end versus the OPEN at its start.
+    """
+    rows = read_log()
+    pending = [r for r in rows if not r["outcome"] and r["round_start_ms"]]
+    now_ms = int(time.time() * 1000)
+    due = [r for r in pending if int(r["round_start_ms"]) + ROUND_MS + 60_000 < now_ms]
+    if not due:
+        return rows, 0
+
+    lo = min(int(r["round_start_ms"]) for r in due)
+    hi = max(int(r["round_start_ms"]) for r in due) + ROUND_MS
+    try:
+        resp = requests.get(
+            KLINES,
+            params={"symbol": SYMBOL, "interval": "1m",
+                    "startTime": lo, "endTime": hi + 60_000, "limit": 1000},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        opens = {int(k[0]): float(k[1]) for k in resp.json()}
+    except Exception as exc:
+        print(f"  [no se pudo calificar: {exc}]")
+        return rows, 0
+
+    graded = 0
+    for r in due:
+        s = int(r["round_start_ms"])
+        a, b = opens.get(s), opens.get(s + ROUND_MS)
+        if a is None or b is None:
+            continue
+        r["outcome"] = "Up" if b > a else "Down"
+        r["correct"] = str(r["side"] == r["outcome"])
+        graded += 1
+    if graded:
+        write_log(rows)
+    return rows, graded
+
+
+def show_tally(rows):
+    done = [r for r in rows if r["correct"] in ("True", "False")]
+    if not done:
+        return
+    hits = sum(1 for r in done if r["correct"] == "True")
+    n = len(done)
+    p = hits / n
+    z = 1.96
+    d = 1 + z * z / n
+    c = (p + z * z / (2 * n)) / d
+    mrg = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
+    lo, hi = max(0.0, c - mrg), min(1.0, c + mrg)
+    print(f"Historial propio: {hits}/{n} = {p*100:.1f}%   "
+          f"IC95% [{lo*100:.1f}%, {hi*100:.1f}%]")
+    if n < 100:
+        print(f"  (muy poco todavia para significar nada -- el intervalo lo dice)")
+    print()
+
+
 def next_boundary_ms(now_ms=None):
     now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
     return ((now_ms // ROUND_MS) + 1) * ROUND_MS
@@ -142,8 +260,12 @@ def report(m, target_ms, p_up, feats, price_now, firme):
 
     if not firme:
         faltan = (target_ms - int(time.time() * 1000)) / 1000
-        print(f"  PRELIMINAR — faltan {int(faltan)//60}:{int(faltan)%60:02d} para el inicio.")
-        print("  Puede cambiar con las velas que faltan cerrar.\n")
+        if faltan > 0:
+            print(f"  PRELIMINAR — faltan {int(faltan)//60}:{int(faltan)%60:02d} para el inicio.")
+            print("  Puede cambiar con las velas que faltan cerrar.")
+        else:
+            print(f"  TARDE — la ronda arranco hace {int(-faltan)}s. No se anota.")
+        print()
 
     if conf - 0.5 < margin:
         print(f"  SIN OPINION   (confianza {conf*100:.1f}%, hace falta {(0.5+margin)*100:.0f}%)")
@@ -183,12 +305,23 @@ def one_shot(m, wait):
 
     candles = fetch_candles()
     price = fetch_price()
-    firme = (target / 1000 - time.time()) <= 5
+    # Firm only in a window around the boundary. Too early and the reading can
+    # still change; too late and `price` is already the round in progress,
+    # which is information the model is not supposed to have.
+    faltan_s = target / 1000 - time.time()
+    firme = -60 <= faltan_s <= 5
     p_up, feats = predict_round(m, candles, target, price)
     if p_up is None:
         print("No hay suficientes velas para calcular las features todavia.")
         return
-    report(m, target, p_up, feats, price, firme)
+    lado = report(m, target, p_up, feats, price, firme)
+
+    # Only a firm call gets recorded. A preliminary reading can still change,
+    # and logging one would quietly turn "what the model said" into "what the
+    # model said at whatever moment I happened to look".
+    if lado and firme:
+        record(target, lado, max(p_up, 1 - p_up), price)
+        print(f"\n  [anotado en {os.path.basename(LOG)} antes de conocer el resultado]")
 
 
 def main():
@@ -204,6 +337,11 @@ def main():
     print(f"Modelo: {m['trained_on_rounds']:,} rondas, entrenado hasta {hasta:%d-%b-%Y}")
     print("Acierto medido out-of-sample cuando se pronuncia: 54.5% (765 rondas)\n")
 
+    rows, graded = grade_pending()
+    if graded:
+        print(f"Calificadas {graded} predicciones pendientes.")
+    show_tally(rows)
+
     if not args.loop:
         one_shot(m, args.wait)
         return
@@ -212,6 +350,9 @@ def main():
         try:
             one_shot(m, wait=True)
             print()
+            rows, graded = grade_pending()
+            if graded:
+                show_tally(rows)
         except KeyboardInterrupt:
             return
         except Exception as exc:

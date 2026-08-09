@@ -294,18 +294,37 @@ def main():
         print(f"  que impone el precio ({breakeven*100:.1f}%). El mercado NO estaba")
         print("  cotizando esto. Vale seguir midiendo con mas rondas antes de")
         print("  arriesgar dinero, pero es la primera señal que pasa todos los filtros.")
-    elif acc > breakeven:
-        print(f"  El acierto ({acc*100:.1f}%) supera el breakeven ({breakeven*100:.1f}%),")
-        print("  pero el intervalo de confianza todavia lo incluye. Con esta muestra")
-        print("  no se distingue de la suerte. Hacen falta mas rondas.")
-        faltan = max(0, 400 - len(conf))
-        print(f"  Como referencia, con ~400 rondas de este tipo el intervalo se")
-        print(f"  angosta lo suficiente para decidir. Faltan ~{faltan}.")
+    elif lo < 0.545 < hi:
+        # The measured accuracy is inside the range the model claims, so this
+        # sample cannot tell the two apart -- whichever side of breakeven the
+        # point estimate happens to land on.
+        print(f"  El acierto medido ({acc*100:.1f}%) queda por debajo del breakeven")
+        print(f"  ({breakeven*100:.1f}%), pero el IC95% [{lo*100:.1f}%, {hi*100:.1f}%] contiene")
+        print("  tanto el breakeven como el 54.5% que el modelo declara. Con esta")
+        print("  muestra NO se puede distinguir entre las dos cosas: no es")
+        print("  evidencia en contra, es falta de datos.")
     else:
         print(f"  El acierto ({acc*100:.1f}%) NO cubre el breakeven ({breakeven*100:.1f}%)")
-        print("  que impone el precio del mercado. El modelo acierta mas que una")
-        print("  moneda, pero el mercado cobra por adelantado exactamente esa")
-        print("  ventaja -- que es lo que uno espera de un mercado que funciona.")
+        print("  que impone el precio del mercado, y el intervalo tampoco llega.")
+        print("  Con esta muestra el modelo no paga lo que cuesta jugar.")
+
+    # What it would actually take to settle this -- the honest number, not a
+    # comforting one. Separating 54.5% from the breakeven the market charges
+    # needs the interval narrower than the gap between them.
+    print("\n  Cuanto falta para decidirlo de verdad:")
+    gap = 0.545 - breakeven
+    if gap <= 0:
+        print(f"    Al precio que cobra el mercado ({avg_price:.3f}) el breakeven es")
+        print(f"    {breakeven*100:.1f}%, por encima del 54.5% del modelo. No hay nada")
+        print("    que medir: aunque el modelo funcione, a este precio no alcanza.")
+    else:
+        need = 0.545 * (1 - 0.545) * (1.96 / gap) ** 2
+        total = need / (len(conf) / len(joined))
+        print(f"    separar 54.5% de {breakeven*100:.1f}% (brecha {gap*100:.1f} pp) exige"
+              f" ~{need:,.0f} rondas de confianza")
+        print(f"    a un {len(conf)/len(joined)*100:.0f}% de disparo -> ~{total:,.0f} rondas totales"
+              f" = ~{total*5/60/24:.0f} dias de logging continuo")
+        print(f"    llevas {len(conf)}")
     print(f"\n  Muestra: {len(conf)} rondas. Todo lo de arriba es en papel.")
 
 
