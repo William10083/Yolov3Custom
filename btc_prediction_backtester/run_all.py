@@ -33,8 +33,10 @@ from datetime import datetime, timezone
 HERE = os.path.dirname(os.path.abspath(__file__))
 PRED = os.path.join(HERE, "predict_next.py")
 ODDS = os.path.join(HERE, "local_odds_logger.py")
+LAG = os.path.join(HERE, "lag_tiempo_real.py")
 
-COLORES = {"pred": "\033[36m", "odds": "\033[33m", "sys": "\033[35m"}
+COLORES = {"pred": "\033[36m", "odds": "\033[33m", "lag": "\033[32m",
+           "sys": "\033[35m"}
 RESET = "\033[0m"
 USAR_COLOR = sys.stdout.isatty()
 
@@ -104,12 +106,18 @@ def supervisar(tag, cmd):
         vivio = time.time() - arranco
         emitir("sys", f"{tag} termino (codigo {codigo}) despues de {vivio/60:.1f} min")
 
-        # Un hijo que muere en segundos esta roto, no con mala suerte: no tiene
-        # sentido reintentar cada 5 s para siempre. Uno que aguanto un rato es
-        # un corte de red, y ese si se reintenta rapido.
-        if vivio > 120:
+        # Un hijo que termina con codigo 0 hizo su trabajo y salio -- es el
+        # caso de la medicion de latencia, que corre una ventana y reporta.
+        # Tratarlo como caida y aplicarle backoff seria castigarlo por
+        # funcionar bien.
+        if codigo == 0:
+            espera = 5
+        elif vivio > 120:
+            # Aguanto un rato y murio: corte de red. Se reintenta rapido.
             espera = 5
         else:
+            # Muere en segundos: esta roto, no con mala suerte. No tiene
+            # sentido machacarlo cada 5 s para siempre.
             espera = min(espera * 2, 300)
         emitir("sys", f"reintentando {tag} en {espera}s")
         for _ in range(espera):
@@ -122,6 +130,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--solo-pred", action="store_true",
                     help="solo predicciones, sin el logger de precios")
+    ap.add_argument("--con-lag", action="store_true",
+                    help="sumar la medicion de latencia (mas carga sobre la API)")
+    ap.add_argument("--lag-minutos", type=int, default=30,
+                    help="duracion de cada ventana de medicion de latencia")
     args = ap.parse_args()
 
     faltan_llaves = not (os.environ.get("BINANCE_API_KEY")
@@ -154,6 +166,18 @@ def main():
         print("  Predicciones + precios de mercado.")
         print("  El logger va en silencio: solo registra precios. Sus señales")
         print("  viejas midieron 32% en vivo y ya no avisan por Telegram.")
+
+    if args.con_lag and not args.solo_pred and not faltan_llaves and os.path.exists(LAG):
+        # El libro a 0.5/s en vez de 1/s: el logger ya lo esta polleando cada
+        # 5 s y las dos peticiones van al mismo limite de la API.
+        tareas.append(("lag", [sys.executable, LAG,
+                               "--minutos", str(args.lag_minutos),
+                               "--libro-hz", "0.5"]))
+        print(f"  Mas la medicion de latencia: informe cada {args.lag_minutos} min,")
+        print("  reiniciando la ventana al terminar cada uno.")
+    elif args.con_lag:
+        print("  --con-lag pedido pero no se puede: necesita las llaves y")
+        print("  lag_tiempo_real.py junto a este archivo.")
 
     if not os.environ.get("TERMUX_VERSION"):
         pass

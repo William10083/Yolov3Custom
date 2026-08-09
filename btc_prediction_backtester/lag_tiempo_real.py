@@ -164,17 +164,27 @@ def main():
         h.start()
 
     fin = time.time() + args.minutos * 60
+    tty = sys.stdout.isatty()
+    ultimo_aviso = 0
     try:
         while time.time() < fin:
             time.sleep(5)
-            sys.stdout.write(f"\r  spot: {len(spot_serie):,}   libro: {len(libro_serie):,}   "
-                             f"faltan {int(fin - time.time())}s   ")
-            sys.stdout.flush()
+            if tty:
+                sys.stdout.write(f"\r  spot: {len(spot_serie):,}   libro: {len(libro_serie):,}   "
+                                 f"faltan {int(fin - time.time())}s   ")
+                sys.stdout.flush()
+            elif time.time() - ultimo_aviso >= 300:
+                # Sin terminal (bajo run_all) va una linea cada 5 min: suficiente
+                # para saber que sigue vivo, sin inundar el log compartido.
+                ultimo_aviso = time.time()
+                print(f"  muestreando... spot {len(spot_serie):,}  "
+                      f"libro {len(libro_serie):,}  faltan {int(fin - time.time())}s",
+                      flush=True)
     except KeyboardInterrupt:
         pass
     _parar.set()
     time.sleep(1.5)
-    print("\n")
+    print()
 
     if len(libro_serie) < 60 or len(spot_serie) < 200:
         print(f"Muestra insuficiente (libro {len(libro_serie)}, spot {len(spot_serie)}).")
