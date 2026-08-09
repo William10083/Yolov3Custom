@@ -304,6 +304,60 @@ mercado ETH vivo `price` marcaba 0.96 mientras `chance` marcaba 0.49, o sea
 que `price` parece el ultimo trade de un libro flaco y `chance` es la
 cotizacion real. El logger ya usa `chance`.
 
+### El veredicto final: el mercado gana, y se sabe por que
+
+`latencia_mercado.py` sobre 11,291 fotos del libro en 296 rondas reales cierra
+el proyecto. Tres resultados, en orden de importancia.
+
+**1. El mercado NO va con retraso.** El error contra la probabilidad real es
+minimo a 0 segundos y crece monotonamente: 8.77pp a 0s, 9.11 a 10s, 9.62 a
+15s, 10.97 a 30s, 15.73 a 90s. Los retrasos de 3-7s de Kalshi y de 30-90s de
+Polymarket que hacen funcionar a los bots de latencia **no existen aca**. Este
+mercado cotiza el presente.
+
+**2. El mercado esta bien calibrado.** Brecha media de -0.3 a -0.5pp: sin
+sesgo. Lo que hay es 7-10pp de dispersion, y la pregunta era de quien.
+
+**3. La dispersion es MIA.** Comprando el lado que mi modelo decia
+infravalorado, contra el resultado real de cada ronda:
+
+| brecha | rondas | acierto | precio medio | EV real |
+|---|---|---|---|---|
+| 3 pp | 281 | 37.6% | 0.415 | **-20.0%** |
+| 5 pp | 280 | 34.6% | 0.390 | **-21.7%** |
+| 10 pp | 269 | 28.4% | 0.329 | **-23.9%** |
+| 15 pp | 245 | 26.2% | 0.290 | **-16.9%** |
+
+Monotono: **cuanto mas discrepa mi modelo del mercado, mas se equivoca mi
+modelo.** No es ruido, es una señal invertida y sistematica.
+
+#### El mecanismo, encontrado y medido
+
+Mi tabla escala el movimiento por la volatilidad de la hora PREVIA. Medido
+sobre 420,737 rondas, la volatilidad DENTRO de la ronda es menor que la de la
+hora previa en el **72.6%** de los casos, con mediana **0.738**.
+
+O sea que mi sigma esta ~26% inflado. Eso achica mi z, pega mis probabilidades
+a 0.5, y me hace sobrevaluar sistematicamente al lado barato. El precio medio
+pagado en el test -- 0.29 a 0.41, siempre el underdog -- coincide exacto con
+esa prediccion.
+
+El mercado ve la volatilidad real del momento, del flujo de ordenes que esta
+ocurriendo. Yo veo una estimacion de hace una hora.
+
+#### Lo que esto significa para el proyecto
+
+La ventaja que usan los que ganan en estos mercados no es predecir: es
+[arbitraje de latencia](https://www.financemagnates.com/trending/prediction-markets-are-turning-into-a-bot-playground/),
+market making y arbitraje entre plataformas. Ninguna de las tres esta
+disponible desde un telefono polleando cada 5 segundos, y la primera ni
+siquiera existe en esta plataforma.
+
+Predecir la proxima vela de 5 minutos desde velas historicas es exactamente lo
+unico que este mercado tiene bien cotizado. Por eso el techo fue 52-54%, por
+eso ninguno de los siete caminos probados lo movio, y por eso el mercado le
+gana a mi modelo cada vez que discrepan.
+
 ### Como usarlo
 
 **Para recolectar, una sola terminal:**
