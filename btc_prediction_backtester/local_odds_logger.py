@@ -80,6 +80,23 @@ if not API_KEY or not API_SECRET:
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
+# Los avisos de este archivo estan APAGADOS por defecto, y no por prudencia:
+# sus señales (volume_imbalance_contrarian y compañia) se midieron en vivo y
+# dieron 16/50 = 32% de acierto, muy por debajo del azar. win_loss_diagnosis.py
+# mostro que no hay ninguna caracteristica que separe sus aciertos de sus
+# fallos: la señal esta vacia, no invertida. Seguir mandandolas es ruido con
+# formato de recomendacion.
+#
+# Hoy este archivo sirve para UNA cosa: registrar a cuanto cotiza el mercado
+# cada ronda, que es el dato que falta para cerrar el proyecto. Eso lo sigue
+# haciendo igual, en los CSV.
+#
+# Quien avisa por Telegram ahora es predict_next.py, con el modelo medido en
+# 54.25% sobre 23,571 llamadas.
+#
+# SIGNAL_ALERTS=1 las reactiva, si alguna vez hay razon para hacerlo.
+SEND_SIGNAL_ALERTS = os.environ.get("SIGNAL_ALERTS", "0") == "1"
+
 REST_BASE = "https://api.binance.com"
 SIGN_MARKET_DATA_CALLS = True  # flip to False if these specific calls reject the signature
 POLL_INTERVAL_SECONDS = 5
@@ -619,6 +636,8 @@ def send_telegram(html_body, silent=False):
     `silent` maps to Telegram's disable_notification -- the routine
     once-per-round status lands without sound or vibration, so only the
     actual opportunities buzz the phone."""
+    if not SEND_SIGNAL_ALERTS:
+        return
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
     try:

@@ -152,6 +152,8 @@ def main():
     else:
         tareas.append(("odds", [sys.executable, ODDS]))
         print("  Predicciones + precios de mercado.")
+        print("  El logger va en silencio: solo registra precios. Sus señales")
+        print("  viejas midieron 32% en vivo y ya no avisan por Telegram.")
 
     if not os.environ.get("TERMUX_VERSION"):
         pass
@@ -162,8 +164,9 @@ def main():
 
     print()
     if telegram:
-        print("  Telegram: ACTIVO. Avisa cuando el modelo se compromete")
-        print("  (~43 veces al dia). Las rondas sin opinion no se mandan.")
+        print("  Telegram: ACTIVO. Solo avisa predict_next.py, cuando el modelo")
+        print("  se compromete (~43 veces al dia). Las rondas sin opinion no se")
+        print("  mandan, y las señales viejas del logger tampoco.")
     else:
         print("  Telegram: apagado (faltan TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID).")
         print("  Todo se sigue guardando en los CSV igual.")
