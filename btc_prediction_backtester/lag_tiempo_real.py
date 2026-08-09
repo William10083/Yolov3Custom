@@ -33,37 +33,27 @@ tramos planos no hay informacion sobre latencia, solo ruido.
 Solo lectura. No coloca ordenes.
 """
 import argparse
-import hashlib
-import hmac
 import json
 import os
 import statistics
 import sys
 import threading
 import time
-import urllib.parse
 from collections import deque
 
 import requests
 
-API_KEY = os.environ.get("BINANCE_API_KEY")
-API_SECRET = os.environ.get("BINANCE_API_SECRET")
-REST_BASE = "https://api.binance.com"
-NS = "/sapi/v1/w3w/wallet/prediction"
+# La busqueda del mercado y la lectura del libro se toman del logger en vez de
+# reimplementarse: sus parametros salieron de descubrir a mano cada error
+# -3026 "falta el parametro X", y rehacerlos aca solo repite ese trabajo mal.
+os.environ.setdefault("SIGNAL_ALERTS", "0")
+import local_odds_logger as L
+
 SPOT = "https://data-api.binance.vision/api/v3/ticker/bookTicker"
 
 spot_serie = deque(maxlen=200_000)     # (t_local, precio_medio_spot)
 libro_serie = []                        # (t_local, mid, best_bid, best_ask)
 _parar = threading.Event()
-
-
-def firmar(params):
-    p = dict(params)
-    p["timestamp"] = str(int(time.time() * 1000))
-    p["recvWindow"] = "5000"
-    qs = urllib.parse.urlencode(sorted(p.items()))
-    sig = hmac.new(API_SECRET.encode(), qs.encode(), hashlib.sha256).hexdigest()
-    return f"{qs}&signature={sig}"
 
 
 def muestrear_spot(intervalo):
@@ -86,17 +76,15 @@ def muestrear_spot(intervalo):
         time.sleep(max(0, intervalo - (time.time() - t0)))
 
 
-def muestrear_libro(market_id, vendor, token_id, condition_id, intervalo):
-    s = requests.Session()
+def muestrear_libro(ctx, intervalo):
+    """Usa get_order_book() del logger: es el mismo camino que ya funciona en
+    produccion, con los parametros que costo descubrir uno por uno."""
+    market_id, vendor, token_id, condition_id = ctx
     errores = 0
     while not _parar.is_set():
         t0 = time.time()
         try:
-            params = {"marketId": market_id, "vendor": vendor,
-                      "tokenId": token_id, "conditionId": condition_id}
-            params = {k: v for k, v in params.items() if v}
-            r = s.get(f"{REST_BASE}{NS}/order-book?{firmar(params)}",
-                      headers={"X-MBX-APIKEY": API_KEY}, timeout=8)
+            r = L.get_order_book(market_id, vendor, token_id, condition_id)
             if r.status_code == 200:
                 b = r.json()
                 bids, asks = b.get("bids") or [], b.get("asks") or []
@@ -106,7 +94,7 @@ def muestrear_libro(market_id, vendor, token_id, condition_id, intervalo):
             else:
                 errores += 1
                 if errores <= 3:
-                    print(f"\n  [libro HTTP {r.status_code}] {r.text[:120]}")
+                    print(f"\n  [libro HTTP {r.status_code}] {r.text[:150]}")
         except Exception as exc:
             errores += 1
             if errores <= 3:
@@ -142,31 +130,26 @@ def main():
     ap.add_argument("--libro-hz", type=float, default=1.0, help="lecturas del libro por segundo")
     args = ap.parse_args()
 
-    if not API_KEY or not API_SECRET:
-        raise SystemExit("Faltan BINANCE_API_KEY / BINANCE_API_SECRET (source ~/.btc_env)")
+    # local_odds_logger ya aborta al importarse si faltan las llaves, asi que
+    # llegar hasta aca implica que estan.
 
-    print("Buscando el mercado BTC 5m...")
-    r = requests.get(f"{REST_BASE}{NS}/market/list?{firmar({'limit': 20})}",
-                     headers={"X-MBX-APIKEY": API_KEY}, timeout=15)
-    r.raise_for_status()
-    topic = next((t for t in (r.json().get("marketTopics") or [])
-                  if str(t.get("slug", "")).startswith("btc-updown-5m-")), None)
-    if not topic:
-        raise SystemExit("No hay mercado btc-updown-5m vivo ahora.")
-
-    mercado = (topic.get("markets") or [{}])[0]
-    market_id = mercado.get("marketId") or mercado.get("id")
-    vendor = topic.get("vendor")
-    condition_id = mercado.get("conditionId")
-    up = next((o for o in (mercado.get("outcomes") or [])
-               if str(o.get("name", "")).lower() == "up"), None)
-    token_id = (up or {}).get("tokenId")
-    print(f"  marketId={market_id}  vendor={vendor}")
-    print(f"  slug={topic.get('slug')}")
-    if not market_id or not token_id:
-        print("\n  No pude extraer marketId/tokenId. Respuesta:")
-        print("  " + json.dumps(topic)[:600])
+    print("Buscando el mercado BTC 5m (con el buscador del logger)...")
+    market_id, ronda, topic = L.find_btc_5m_market()
+    if market_id is None:
+        print("  No se encontro el mercado. El logger ya imprimio el detalle arriba.")
         return
+    vendor, condition_id, token_id = L._extract_poll_context(ronda, topic)
+    ctx = (market_id, vendor, token_id, condition_id)
+    print(f"  marketId={market_id}  vendor={vendor}")
+
+    # Una lectura de prueba antes de arrancar los 30 minutos: si el libro no
+    # responde, es mejor enterarse ahora que despues de media hora muestreando.
+    prueba = L.get_order_book(market_id, vendor, token_id, condition_id)
+    if prueba.status_code != 200:
+        print(f"\n  El libro respondio HTTP {prueba.status_code}:")
+        print(f"  {prueba.text[:300]}")
+        return
+    print("  Libro OK.")
 
     print(f"\nMuestreando {args.minutos} min:  BTC {args.spot_hz}/s   "
           f"libro {args.libro_hz}/s")
@@ -175,8 +158,7 @@ def main():
     hilos = [
         threading.Thread(target=muestrear_spot, args=(1 / args.spot_hz,), daemon=True),
         threading.Thread(target=muestrear_libro,
-                         args=(market_id, vendor, token_id, condition_id,
-                               1 / args.libro_hz), daemon=True),
+                         args=(ctx, 1 / args.libro_hz), daemon=True),
     ]
     for h in hilos:
         h.start()
