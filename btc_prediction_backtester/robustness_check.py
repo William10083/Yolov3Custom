@@ -1,7 +1,7 @@
 """Does the high-confidence bucket survive the checks that killed everything else?
 
 predict_model.py found that the model's most confident calls (>= 0.55) hit
-54.5% on 765 unseen rounds. That is above the 2%-fee breakeven. It is also
+55.2% on 11,936 unseen rounds. That is above the 2%-fee breakeven. It is also
 exactly the shape of every false positive found so far in this repo, so it
 gets the same interrogation the others got:
 
@@ -13,10 +13,13 @@ gets the same interrogation the others got:
   3. THE MARKET PRICE. The model only uses candles from before the round
      opens -- the same public information the market prices at that moment.
      If the market agrees with the model, the price rises with the model's
-     confidence and the breakeven rises with it. 54.5% accuracy is worthless
+     confidence and the breakeven rises with it. 55.2% accuracy is worthless
      at a price of 0.55.
-  4. A SEED SHUFFLE. Retrain with different SGD seeds. If the bucket moves a
-     lot, it was the optimizer's noise, not the data.
+  4. REGULARISATION. The solver is deterministic -- Newton-IRLS, no seed and
+     no learning rate -- so the only remaining free choice is l2, and the
+     answer has to survive moving it. An earlier SGD version DID depend on
+     the shuffle seed: one seed's confident bucket hit 53.9% and another's
+     46.3%, which was the optimizer showing through, not the market.
 
 Nothing here re-tunes anything: l2 and the 0.55 margin are fixed to what
 predict_model.py already chose.
@@ -27,10 +30,14 @@ import statistics
 from collections import defaultdict
 from datetime import datetime, timezone
 
-import data_fetch
 import predict_model as pm
 
-L2 = 0.1          # chosen on validation by predict_model.py -- not re-tuned here
+try:
+    import data_fetch
+except ImportError:  # solo hace falta sin --data
+    data_fetch = None
+
+L2 = 1000.0       # chosen on validation by predict_model.py -- not re-tuned here
 MARGIN = 0.05     # the bucket under examination: confidence >= 0.55
 FEE = 0.02
 
@@ -41,7 +48,17 @@ def breakeven_at(price):
 
 
 def main():
-    candles = data_fetch.load_cached()
+    import argparse
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--data", help="CSV de velas (por defecto, el cache de 180 dias)")
+    ap.add_argument("--epochs", type=int, default=40)
+    args = ap.parse_args()
+
+    if args.data:
+        candles = pm.load_csv(args.data)
+    else:
+        candles = data_fetch.load_cached()
     rows = pm.build_dataset(candles)
     rows.sort(key=lambda r: r["t"])
     keys = sorted(rows[0]["x"].keys())
@@ -54,7 +71,7 @@ def main():
 
     print(f"Train {len(tr):,} | test {len(te):,}   (l2={L2}, umbral fijo {0.5+MARGIN:.2f})")
 
-    w, b = pm.train_logistic(tr, keys, l2=L2)
+    w, b = pm.train_logistic_newton(tr, keys, l2=L2)
     preds = [pm.predict(w, b, d["v"]) for d in te]
 
     conf = [
@@ -70,7 +87,7 @@ def main():
     print("\n" + "=" * 72)
     print("1. ESTABILIDAD EN EL TIEMPO  (un edge real aparece en casi todos los tramos)")
     print("=" * 72)
-    chunks = 4
+    chunks = 8
     size = len(te) // chunks
     tramos_ok = 0
     for c in range(chunks):
@@ -151,31 +168,24 @@ def main():
     print("  Eso NO se puede saber con datos historicos de velas -- hace falta")
     print("  el precio cotizado. Es la unica pregunta que queda abierta.")
 
-    # ------------------------------------------------------------- 4. semillas
+    # ---------------------------------------------------- 4. sensibilidad a l2
     print("\n" + "=" * 72)
-    print("4. SENSIBILIDAD A LA SEMILLA  (si se mueve mucho, era ruido del optimizador)")
+    print("4. SENSIBILIDAD A LA REGULARIZACION")
     print("=" * 72)
-    accs = []
-    for seed in range(5):
-        ws, bs = pm.train_logistic(tr, keys, l2=L2, seed=seed)
+    print("  El solver es determinista: no hay semilla que cambie el resultado.")
+    print("  Lo unico que queda por elegir es l2, asi que se mide cuanto mueve.")
+    for l2 in (0.1, 1.0, 10.0, 100.0, 1000.0):
+        ws, bs = pm.train_logistic_newton(tr, keys, l2=l2)
         sub = [(pm.predict(ws, bs, d["v"]), d["y"]) for d in te]
         sub = [(p, y) for p, y in sub if abs(p - 0.5) >= MARGIN]
-        if len(sub) < 20:
-            print(f"  semilla {seed}: solo {len(sub)} rondas superan el umbral")
-            accs.append(None)
+        if len(sub) < 30:
+            print(f"  l2={l2:<8} solo {len(sub)} rondas superan el umbral")
             continue
         k = sum(1 for p, y in sub if (p >= 0.5) == (y == 1))
-        accs.append(k / len(sub))
-        print(f"  semilla {seed}: {k:>4}/{len(sub):<4} {k/len(sub)*100:>6.2f}%")
-    vivos = [x for x in accs if x is not None]
-    if len(vivos) > 1:
-        print(f"\n  rango {min(vivos)*100:.2f}% - {max(vivos)*100:.2f}%  "
-              f"(desviacion {statistics.pstdev(vivos)*100:.2f} pp)")
-        if min(vivos) > 0.5051:
-            print("  Todas las semillas superan el breakeven.")
-        else:
-            print("  Alguna semilla NO supera el breakeven: el resultado depende del azar")
-            print("  del entrenamiento, no solo de los datos.")
+        p_, l_, h_ = pm.wilson(k, len(sub))
+        marca = "ok" if l_ > 0.5051 else "NO"
+        print(f"  l2={l2:<8} {k:>6}/{len(sub):<6} {p_*100:>6.2f}%  "
+              f"IC95% [{l_*100:.2f}%, {h_*100:.2f}%]  {marca}")
 
 
 if __name__ == "__main__":

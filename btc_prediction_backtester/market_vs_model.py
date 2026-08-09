@@ -1,13 +1,15 @@
 """The decisive question: does the market already price what the model sees?
 
-robustness_check.py showed the model's confident calls hit 54.5% on rounds it
-never saw, and that this survives time-splitting, side-balance, and seed
-changes. But every feature comes from candles that closed BEFORE the round
-opened -- public information the market can price. So 54.5% accuracy proves
-nothing on its own:
+robustness_check.py showed the model's confident calls hit 55.2% on 11,936
+rounds it never saw, and that this survives time-splitting and side-balance
+checks and barely moves across four orders of magnitude of regularisation.
 
-    paying 0.50 and winning 54.5% of the time  ->  +6.8% per bet
-    paying 0.56 and winning 54.5% of the time  ->  -4.6% per bet
+But every feature comes from candles that closed BEFORE the round opened --
+public information the market can price. So 55.2% accuracy proves nothing on
+its own:
+
+    paying 0.50 and winning 55.2% of the time  ->  +8.2% per bet
+    paying 0.56 and winning 55.2% of the time  ->  -3.4% per bet
 
 The gap between those two lines is the whole project. This script closes it
 using the quotes actually collected in round_outcomes.csv: it replays the
@@ -155,6 +157,7 @@ def main():
 
     m = load_model()
     margin = m.get("confidence_margin", 0.05)
+    CLAIMED = m.get("accuracy_confident", 0.545)
     cutoff = m.get("trained_until_ms", 0)
 
     outcomes = load_positional(OUTCOMES, OUTCOMES_SCHEMA)
@@ -190,7 +193,7 @@ def main():
         return
 
     # Reuse build_dataset so the features are computed by exactly the same code
-    # that produced the 54.5% -- no reimplementation to drift out of sync.
+    # that produced the headline number -- no reimplementation to drift apart.
     feat_rows = {row["t"]: row for row in pm.build_dataset(candles)}
 
     joined = []
@@ -294,13 +297,13 @@ def main():
         print(f"  que impone el precio ({breakeven*100:.1f}%). El mercado NO estaba")
         print("  cotizando esto. Vale seguir midiendo con mas rondas antes de")
         print("  arriesgar dinero, pero es la primera señal que pasa todos los filtros.")
-    elif lo < 0.545 < hi:
+    elif lo < CLAIMED < hi:
         # The measured accuracy is inside the range the model claims, so this
         # sample cannot tell the two apart -- whichever side of breakeven the
         # point estimate happens to land on.
         print(f"  El acierto medido ({acc*100:.1f}%) queda por debajo del breakeven")
         print(f"  ({breakeven*100:.1f}%), pero el IC95% [{lo*100:.1f}%, {hi*100:.1f}%] contiene")
-        print("  tanto el breakeven como el 54.5% que el modelo declara. Con esta")
+        print(f"  tanto el breakeven como el {CLAIMED*100:.1f}% que el modelo declara. Con esta")
         print("  muestra NO se puede distinguir entre las dos cosas: no es")
         print("  evidencia en contra, es falta de datos.")
     else:
@@ -312,15 +315,15 @@ def main():
     # comforting one. Separating 54.5% from the breakeven the market charges
     # needs the interval narrower than the gap between them.
     print("\n  Cuanto falta para decidirlo de verdad:")
-    gap = 0.545 - breakeven
+    gap = CLAIMED - breakeven
     if gap <= 0:
         print(f"    Al precio que cobra el mercado ({avg_price:.3f}) el breakeven es")
-        print(f"    {breakeven*100:.1f}%, por encima del 54.5% del modelo. No hay nada")
+        print(f"    {breakeven*100:.1f}%, por encima del {CLAIMED*100:.1f}% del modelo. No hay nada")
         print("    que medir: aunque el modelo funcione, a este precio no alcanza.")
     else:
-        need = 0.545 * (1 - 0.545) * (1.96 / gap) ** 2
+        need = CLAIMED * (1 - CLAIMED) * (1.96 / gap) ** 2
         total = need / (len(conf) / len(joined))
-        print(f"    separar 54.5% de {breakeven*100:.1f}% (brecha {gap*100:.1f} pp) exige"
+        print(f"    separar {CLAIMED*100:.1f}% de {breakeven*100:.1f}% (brecha {gap*100:.1f} pp) exige"
               f" ~{need:,.0f} rondas de confianza")
         print(f"    a un {len(conf)/len(joined)*100:.0f}% de disparo -> ~{total:,.0f} rondas totales"
               f" = ~{total*5/60/24:.0f} dias de logging continuo")

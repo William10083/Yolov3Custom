@@ -91,12 +91,72 @@ de $10.
 honesto. Una version anterior de este script decia "~400 rondas alcanza" --
 estaba mal y ya esta corregido.
 
+### Segunda vuelta: 4 anios de datos y un solver determinista
+
+La pregunta que destrabo esto fue del usuario: *"la misma API no te puede
+devolver un historico de esa magnitud?"*. Para las velas de BTC, si --
+`data.binance.vision` sirve archivos mensuales y `bulk_fetch.py` baja 4 anios
+(2,103,760 velas, 0.00% de minutos faltantes) en un par de minutos. Para los
+precios del mercado de prediccion, no: un order book es efimero y nadie
+guarda a cuanto cotizaba "Up" el 3 de julio a las 14:35.
+
+Correr el mismo protocolo sobre 4 anios encontro un problema serio que los
+180 dias escondian: **el resultado dependia de la semilla del SGD.** Una
+semilla daba 53.9% en el bucket de confianza y otra 46.3% sobre 6,947 rondas.
+Con pesos tan chicos (~0.04) la superficie de perdida es casi plana, cada
+semilla aterrizaba en un modelo distinto, y el umbral de 0.55 seleccionaba
+subconjuntos completamente distintos de rondas. Eso no era una propiedad del
+mercado, era el optimizador asomandose.
+
+El arreglo correcto no es promediar semillas: es no tener semilla.
+`train_logistic_newton()` resuelve por Newton-Raphson (IRLS), sin tasa de
+aprendizaje y sin barajado. Converge a LA solucion de maxima verosimilitud,
+asi que re-correrlo no puede cambiar la respuesta. De paso es ~100x mas
+rapido: 1.5 s donde el SGD tardaba minutos, y el SGD ni siquiera estaba
+llegando al optimo.
+
+Con el solver determinista, sobre 84,143 rondas de test nunca vistas:
+
+| | resultado |
+|---|---|
+| Todas las rondas | 52.07% IC95% [51.73%, 52.41%] |
+| Confianza >= 0.55 | **55.15%** (6,583/11,936) IC95% [54.26%, 56.04%] |
+| Breakeven con fee 2% a precio 0.50 | 50.51% |
+
+Controles, todos con l2 y umbral fijos:
+
+- **8/8 tramos** del periodo de test por encima del breakeven.
+- Funciona en los dos lados: Up 54.20%, Down 56.45%.
+- Le gana a apostar el lado dominante a ciegas: 55.2% vs 49.7%.
+- **Sensibilidad a l2:** de 0.1 a 1000 el resultado va de 54.90% a 55.15%.
+  Cuatro ordenes de magnitud y menos de 0.3 pp de diferencia.
+
+Precio maximo pagable usando el limite inferior del IC: **0.532**.
+
+### Lo que esto le hace al calendario
+
+El numero de 38 dias asumia que habia que medir DOS cosas en vivo: el acierto
+del modelo y el precio del mercado. El acierto ya no hace falta medirlo en
+vivo -- esta clavado con 11,936 rondas historicas. Lo unico que queda por
+medir es **el precio medio que cobra el mercado**, y una media de una
+variable continua converge mucho mas rapido que una tasa binaria:
+
+| que falta medir | rondas de confianza | dias |
+|---|---|---|
+| acierto + precio (lo que se creia) | ~1,409 | ~38 |
+| solo el precio, a ±0.010 | ~178 | **~4.4** |
+| solo el precio, a ±0.005 | ~714 | ~18 |
+
+Con las 17 rondas que ya hay: precio medio 0.509 contra un maximo pagable de
+0.532, z = 1.39. Apunta en la direccion correcta y todavia no es concluyente.
+
 ### Como usarlo
 
 ```bash
-python3 predict_model.py       # entrena y mide (tarda unos minutos)
-python3 robustness_check.py    # los cuatro controles
-python3 export_model.py        # congela los pesos en model.json
+python3 bulk_fetch.py --months 48          # 4 anios de velas
+python3 predict_model.py --data data/btcusdt_1m_long.csv   # entrena y mide
+python3 robustness_check.py --data data/btcusdt_1m_long.csv  # los controles
+python3 export_model.py --data data/btcusdt_1m_long.csv      # congela los pesos
 python3 market_vs_model.py     # modelo vs precio real cotizado  ← el que decide
 python3 predict_next.py        # predice la proxima vela de 5 min
 python3 predict_next.py --loop # se queda prediciendo cada ronda

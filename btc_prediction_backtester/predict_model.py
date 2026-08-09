@@ -204,6 +204,80 @@ def train_logistic(data, keys, lr=0.05, epochs=40, l2=0.01, seed=0):
     return w, b
 
 
+def solve(A, y):
+    """Gaussian elimination with partial pivoting. A is p x p, y is length p."""
+    p = len(y)
+    M = [row[:] + [y[i]] for i, row in enumerate(A)]
+    for col in range(p):
+        piv = max(range(col, p), key=lambda r: abs(M[r][col]))
+        if abs(M[piv][col]) < 1e-12:
+            return None
+        M[col], M[piv] = M[piv], M[col]
+        d = M[col][col]
+        for r in range(col + 1, p):
+            f = M[r][col] / d
+            if f:
+                for c in range(col, p + 1):
+                    M[r][c] -= f * M[col][c]
+    out = [0.0] * p
+    for r in range(p - 1, -1, -1):
+        s = M[r][p] - sum(M[r][c] * out[c] for c in range(r + 1, p))
+        out[r] = s / M[r][r]
+    return out
+
+
+def train_logistic_newton(data, keys, l2=1.0, iters=12, tol=1e-8):
+    """Fit by Newton-Raphson (IRLS) instead of SGD.
+
+    SGD made the answer depend on the shuffle seed: with weights this small
+    the loss surface is nearly flat, so different seeds landed on visibly
+    different models and the 0.55 threshold then selected completely
+    different subsets of rounds -- one seed's confident bucket hit 53.9% and
+    another's 46.3%. That is not a property of the market, it is the
+    optimizer showing through.
+
+    Newton's method has no seed and no learning rate. It converges to THE
+    maximum-likelihood solution for the penalty given, so re-running cannot
+    change the answer. The ridge penalty is applied to the slopes only,
+    never to the intercept.
+    """
+    p = len(keys) + 1  # +1 intercept, kept at index 0
+    beta = [0.0] * p
+    for _ in range(iters):
+        XtWX = [[0.0] * p for _ in range(p)]
+        XtWz = [0.0] * p
+        for d in data:
+            v, y = d["v"], d["y"]
+            eta = beta[0] + sum(beta[j + 1] * v[j] for j in range(len(v)))
+            eta = max(-30.0, min(30.0, eta))
+            mu = 1 / (1 + math.exp(-eta))
+            wgt = max(mu * (1 - mu), 1e-6)
+            z = eta + (y - mu) / wgt
+            row = (1.0,) + tuple(v)
+            wz = wgt * z
+            for a in range(p):
+                ra = row[a]
+                if ra == 0.0:
+                    continue
+                XtWz[a] += ra * wz
+                rw = ra * wgt
+                for bcol in range(a, p):
+                    XtWX[a][bcol] += rw * row[bcol]
+        for a in range(p):
+            for bcol in range(a):
+                XtWX[a][bcol] = XtWX[bcol][a]
+        for a in range(1, p):  # ridge on slopes only
+            XtWX[a][a] += l2
+        new = solve(XtWX, XtWz)
+        if new is None:
+            break
+        shift = max(abs(new[i] - beta[i]) for i in range(p))
+        beta = new
+        if shift < tol:
+            break
+    return beta[1:], beta[0]
+
+
 def predict(w, b, v):
     z = b + sum(wi * vi for wi, vi in zip(w, v))
     return 1 / (1 + math.exp(-max(-30, min(30, z))))
@@ -243,11 +317,40 @@ def evaluate_confident(w, b, data, label, margin):
     )
 
 
+def load_csv(path):
+    import csv
+
+    rows = []
+    with open(path, newline="") as f:
+        for r in csv.DictReader(f):
+            rows.append({
+                "open_time_ms": int(r["open_time_ms"]),
+                "open": float(r["open"]),
+                "high": float(r["high"]),
+                "low": float(r["low"]),
+                "close": float(r["close"]),
+                "volume": float(r["volume"]),
+                "taker_buy_base": float(r.get("taker_buy_base") or 0.0),
+            })
+    rows.sort(key=lambda r: r["open_time_ms"])
+    return rows
+
+
 def main():
-    import data_fetch
+    import argparse
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--data", help="CSV de velas a usar (por defecto, el cache de 180 dias)")
+    ap.add_argument("--epochs", type=int, default=40)
+    args = ap.parse_args()
 
     print("Cargando datos historicos...")
-    candles = data_fetch.load_cached()
+    if args.data:
+        candles = load_csv(args.data)
+    else:
+        import data_fetch
+
+        candles = data_fetch.load_cached()
     rows = build_dataset(candles)
     keys = sorted(rows[0]["x"].keys())
     print(f"Rondas utilizables: {len(rows):,}   features: {len(keys)}")
@@ -264,8 +367,8 @@ def main():
 
     print("\nEntrenando...")
     best = None
-    for l2 in (0.001, 0.01, 0.1, 1.0):
-        w, b = train_logistic(tr, keys, l2=l2)
+    for l2 in (0.1, 1.0, 10.0, 100.0, 1000.0):
+        w, b = train_logistic_newton(tr, keys, l2=l2)
         acc = sum(1 for d in va if (predict(w, b, d["v"]) >= 0.5) == (d["y"] == 1)) / len(va)
         print(f"  l2={l2:<6} val {acc*100:.2f}%")
         if best is None or acc > best[0]:

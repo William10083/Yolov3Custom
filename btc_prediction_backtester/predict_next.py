@@ -1,19 +1,20 @@
 """Predice la proxima vela de 5 minutos: Up o Down.
 
-Usa el modelo congelado en model.json -- el mismo que dio 54.5% de acierto
-sobre 765 rondas que nunca vio, y que aguanto los cuatro controles de
-robustness_check.py. Aca no se entrena nada: se cargan los pesos y se aplican.
+Usa el modelo congelado en model.json -- el mismo que dio 55.2% de acierto
+sobre 11,936 rondas que nunca vio (4 anios de datos), y que aguanto los
+controles de robustness_check.py. Aca no se entrena nada: se cargan los pesos
+y se aplican.
 
 Lo importante de como funciona:
 
-  - Solo se pronuncia cuando la confianza llega al umbral. En el ~93% de las
+  - Solo se pronuncia cuando la confianza llega al umbral. En el ~86% de las
     rondas el modelo no tiene nada que decir, y decirlo es la respuesta
     correcta. Forzar una opinion en cada ronda es exactamente lo que baja el
-    acierto de 54.5% a 50.7%.
+    acierto de 55.2% a 52.1%.
   - Las features salen de velas cerradas ANTES del inicio de la ronda, asi que
     la prediccion queda firme recien en el borde de los :00/:05/:10. Antes de
     eso es preliminar y lo dice.
-  - 54.5% no es dinero. A un precio de 0.50 deja margen; a 0.55 no deja nada.
+  - 55.2% no es dinero. A un precio de 0.50 deja margen; a 0.55 no deja nada.
     Sin comparar contra el precio cotizado esto es una prediccion, no una
     apuesta -- para eso esta market_vs_model.py.
 
@@ -270,7 +271,7 @@ def report(m, target_ms, p_up, feats, price_now, firme):
     if conf - 0.5 < margin:
         print(f"  SIN OPINION   (confianza {conf*100:.1f}%, hace falta {(0.5+margin)*100:.0f}%)")
         print()
-        print("  El modelo no ve nada en esta ronda. No es un fallo: en el 93% de")
+        print("  El modelo no ve nada en esta ronda. No es un fallo: en el 86% de")
         print("  las rondas no hay señal, y las que se saltan son justamente las")
         print("  que hunden el acierto si uno se obliga a opinar siempre.")
         return None
@@ -334,8 +335,15 @@ def main():
 
     m = load_model()
     hasta = datetime.fromtimestamp(m["trained_until_ms"] / 1000, tz=timezone.utc)
+    acc = m.get("accuracy_confident")
+    ci = m.get("accuracy_confident_ci95") or [0, 0]
+    nn = m.get("accuracy_confident_n") or 0
     print(f"Modelo: {m['trained_on_rounds']:,} rondas, entrenado hasta {hasta:%d-%b-%Y}")
-    print("Acierto medido out-of-sample cuando se pronuncia: 54.5% (765 rondas)\n")
+    if acc:
+        print(f"Acierto out-of-sample cuando se pronuncia: {acc*100:.1f}%  "
+              f"IC95% [{ci[0]*100:.1f}%, {ci[1]*100:.1f}%]  ({nn:,} rondas)\n")
+    else:
+        print()
 
     rows, graded = grade_pending()
     if graded:

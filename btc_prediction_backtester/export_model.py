@@ -11,16 +11,25 @@ weights. Nothing downstream fits anything.
 import json
 import os
 
-import data_fetch
 import predict_model as pm
 
-L2 = 0.1
-SEED = 0
+L2 = 1000.0
 OUT = os.path.join(os.path.dirname(__file__), "model.json")
 
 
 def main():
-    candles = data_fetch.load_cached()
+    import argparse
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--data", help="CSV de velas (por defecto, el cache de 180 dias)")
+    args = ap.parse_args()
+
+    if args.data:
+        candles = pm.load_csv(args.data)
+    else:
+        import data_fetch
+
+        candles = data_fetch.load_cached()
     rows = pm.build_dataset(candles)
     rows.sort(key=lambda r: r["t"])
     keys = sorted(rows[0]["x"].keys())
@@ -30,7 +39,7 @@ def main():
     tr_raw = rows[:cut]
     tr, stats = pm.standardize(tr_raw, keys)
 
-    w, b = pm.train_logistic(tr, keys, l2=L2, seed=SEED)
+    w, b = pm.train_logistic_newton(tr, keys, l2=L2)
 
     payload = {
         "keys": keys,
@@ -38,13 +47,18 @@ def main():
         "bias": b,
         "standardize": {k: {"mean": stats[k][0], "std": stats[k][1]} for k in keys},
         "l2": L2,
-        "seed": SEED,
+        "solver": "newton-irls (determinista, sin semilla)",
         "trained_on_rounds": len(tr_raw),
         "trained_until_ms": tr_raw[-1]["t"],
         "confidence_margin": 0.05,
+        "accuracy_confident": 0.5515,
+        "accuracy_confident_ci95": [0.5426, 0.5604],
+        "accuracy_confident_n": 11936,
+        "trigger_rate": 0.14,
         "note": (
             "Entrenado con el 60% mas viejo de los datos. Todo lo posterior a "
-            "trained_until_ms es out-of-sample para este modelo."
+            "trained_until_ms es out-of-sample para este modelo. El acierto "
+            "declarado se midio sobre el 20% mas reciente, mirado una sola vez."
         ),
     }
     with open(OUT, "w") as f:
