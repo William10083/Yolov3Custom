@@ -53,6 +53,8 @@ SPOT = "https://data-api.binance.vision/api/v3/ticker/bookTicker"
 
 spot_serie = deque(maxlen=200_000)     # (t_local, precio_medio_spot)
 libro_serie = []                        # (t_local, mid, best_bid, best_ask)
+_libro_incompleto = 0
+_libro_intentos = 0
 _parar = threading.Event()
 
 
@@ -81,9 +83,11 @@ def muestrear_libro(ctx, intervalo):
     produccion, con los parametros que costo descubrir uno por uno."""
     market_id, vendor, token_id, condition_id = ctx
     errores = 0
+    global _libro_incompleto, _libro_intentos
     while not _parar.is_set():
         t0 = time.time()
         try:
+            _libro_intentos += 1
             r = L.get_order_book(market_id, vendor, token_id, condition_id)
             if r.status_code == 200:
                 b = r.json()
@@ -91,6 +95,11 @@ def muestrear_libro(ctx, intervalo):
                 if bids and asks:
                     bb, ba = float(bids[0]["price"]), float(asks[0]["price"])
                     libro_serie.append(((t0 + time.time()) / 2, (bb + ba) / 2, bb, ba))
+                else:
+                    # Un lado vacio: sin mid no hay punto. Pasa seguido y es la
+                    # razon por la que la resolucion efectiva cae muy por debajo
+                    # de la tasa de peticiones.
+                    _libro_incompleto += 1
             else:
                 errores += 1
                 if errores <= 3:
@@ -198,8 +207,18 @@ def main():
     arr = list(spot_serie)
     precios = [p for _, p in arr]
     difs = [abs(precios[i] - precios[i - 1]) for i in range(1, len(precios))]
-    umbral = statistics.quantiles(difs, n=100)[97] if len(difs) > 200 else max(difs)
+    # Con el mercado quieto la mayoria de las lecturas consecutivas son
+    # identicas, y el percentil 97 de TODAS da $0.00 -- un umbral que no filtra
+    # nada y convierte el estudio de eventos en "todo". Se toma el percentil
+    # sobre las diferencias NO NULAS, con un piso absoluto.
+    no_nulas = [d for d in difs if d > 0]
+    if len(no_nulas) > 100:
+        umbral = max(statistics.quantiles(no_nulas, n=100)[89], 0.5)
+    else:
+        umbral = max(max(difs, default=0), 0.5)
+    quietas = (len(difs) - len(no_nulas)) / len(difs) * 100 if difs else 0
     print(f"  Umbral de salto: ${umbral:.2f} entre lecturas consecutivas")
+    print(f"  Lecturas de spot sin cambio: {quietas:.0f}%")
 
     correl = {}
     for lag_ms in range(0, 12_001, 250):
@@ -258,10 +277,28 @@ def main():
         print("  orden puesta antes de que se cierre -- y ahi mandan la latencia")
         print("  de red y el tamaño disponible en el libro, no la estadistica.")
     print()
-    print(f"  Muestreo real conseguido: spot {len(spot_serie)/(args.minutos*60):.1f}/s, "
-          f"libro {len(libro_serie)/(args.minutos*60):.1f}/s")
-    print("  Un desfase menor al intervalo de muestreo del libro no se puede")
-    print("  distinguir: subi --libro-hz si la API lo permite.")
+    hz_libro = len(libro_serie) / (args.minutos * 60)
+    intervalo = 1 / hz_libro if hz_libro else float("inf")
+    print(f"  Muestreo real: spot {len(spot_serie)/(args.minutos*60):.1f}/s, "
+          f"libro {hz_libro:.2f}/s  (una lectura cada {intervalo:.1f} s)")
+    if _libro_intentos:
+        print(f"  Lecturas del libro descartadas por tener un lado vacio: "
+              f"{_libro_incompleto}/{_libro_intentos} "
+              f"({_libro_incompleto/_libro_intentos*100:.0f}%)")
+    print()
+    if mejor[0] < intervalo:
+        print(f"  ATENCION: el desfase hallado ({mejor[0]:.2f} s) es MENOR que el")
+        print(f"  intervalo entre lecturas del libro ({intervalo:.1f} s), asi que")
+        print("  NO esta resuelto. Cualquier valor por debajo de ese intervalo da")
+        print("  practicamente la misma correlacion -- por eso la curva forma una")
+        print("  meseta plana en vez de un pico. Lo unico que se puede afirmar es")
+        print(f"  que el desfase es menor a {intervalo:.1f} s.")
+        print()
+        print("  Para resolverlo hace falta leer el libro mas seguido, y el cuello")
+        print("  de botella son las lecturas con un lado vacio, no la API.")
+    else:
+        print(f"  El desfase ({mejor[0]:.2f} s) supera el intervalo de muestreo")
+        print(f"  ({intervalo:.1f} s), asi que esta resuelto de verdad.")
 
 
 if __name__ == "__main__":
