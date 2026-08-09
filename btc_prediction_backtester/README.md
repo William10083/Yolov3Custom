@@ -233,6 +233,77 @@ aceleracion del flujo, las mechas de rechazo, la hora del dia -- y nada
 aporta. Caveat: la busqueda usa una submuestra de 100k filas, asi que tiene
 poco poder para detectar mejoras de decimas.
 
+### El mercado resuelve con Chainlink, no con velas de Binance
+
+Sondeando `market/detail` aparecio como resuelve el mercado de verdad:
+
+    variantData.priceFeedProvider = CHAINLINK
+    variantData.startPrice        = 64817.245
+    variantData.endPrice          = 64813.495
+
+Chainlink toma el mid-price entre bid y ask del top of book (de ahi los 3
+decimales); la vela de Binance registra el ultimo trade del minuto. **Todo lo
+medido en este repo usa la vela de Binance.** Una ronda etiquetada al reves es
+ruido inyectado en el entrenamiento y en la medicion, asi que habia que
+medirlo antes de creerle al 54.25%.
+
+`chainlink_vs_klines.py` recupero los precios oficiales de 140 rondas
+consecutivas y los comparo:
+
+| | |
+|---|---|
+| Mismo resultado | 132 (94.29%) |
+| **Distinto** | **1 (0.71%)** |
+| Empate exacto en Chainlink | 7 (5.0%) |
+| Diferencia en el precio de apertura | mediana $0.00, p95 $0.01, max $12.36 |
+
+**0.71% de etiquetas mal.** Contra una ventaja de 4.25 pp, el efecto existe y
+es chico. El backtest se sostiene. La mediana de $0.00 dice que las dos
+fuentes coinciden al centavo casi siempre; las discrepancias son rondas que se
+definen por centavos, donde las dos fuentes se separan.
+
+### Los empates 50-50, y por que no cambian nada
+
+El 5% de las rondas empata EXACTO en Chainlink -- el feed actualiza por umbral
+de desviacion, asi que en periodos quietos el precio reportado al inicio y al
+final es literalmente el mismo numero. Esas rondas **resuelven 50-50**: pagan
+0.5 por accion, ni 1 ni 0.
+
+Suena a que hay que rehacer las cuentas, y no:
+
+    EV por apuesta ignorando los empates: +3.43%
+    EV por apuesta contandolos bien:      +3.43%
+    diferencia: 0.000 pp
+
+Se cancela exacto. En una ronda que empata en Chainlink el precio casi no se
+movio, asi que la etiqueta de Binance es practicamente un volado y acierta la
+mitad de las veces. Una etiqueta al azar y un pago de 0.5 valen **lo mismo en
+esperanza**. El backtest ya lo estaba contando bien sin saberlo.
+
+Lo unico que romperia la cancelacion es que las rondas de confianza empataran
+a una tasa distinta del 5% general: al 2% el EV sube a +3.69%, al 10% baja a
++3.01%. Vale medirlo cuando haya muestra, no cambia la decision de hoy.
+
+### Lo que NO se puede recuperar
+
+Al resolverse un mercado, el precio de cada outcome se sobrescribe con el
+valor de liquidacion:
+
+    id=4465173  RESOLVED  outcomes[0].price = 0
+    id=4464897  RESOLVED  outcomes[0].price = 1
+
+La cotizacion que habia al inicio de la ronda se pierde. De 21 endpoints
+probados, 20 dieron 404 y el unico que existe (`market/detail`) sirve el
+mercado con su precio ya liquidado. **El historial de precios no es
+recuperable** -- ahora medido, no supuesto -- asi que juntarlo en vivo con
+`run_all.py` sigue siendo el unico camino.
+
+Dos detalles utiles del mismo sondeo: `offset` funciona como paginacion en
+`market/list` mientras `page`, `cursor` y `startTime` se ignoran; y en un
+mercado ETH vivo `price` marcaba 0.96 mientras `chance` marcaba 0.49, o sea
+que `price` parece el ultimo trade de un libro flaco y `chance` es la
+cotizacion real. El logger ya usa `chance`.
+
 ### Como usarlo
 
 **Para recolectar, una sola terminal:**
@@ -260,6 +331,8 @@ python3 market_vs_model.py     # modelo vs precio real cotizado  ← el que deci
 python3 walk_forward.py --data data/btcusdt_1m_long.csv      # ¿hay que reentrenar?
 python3 short_window_test.py --data data/btcusdt_1m_long.csv # ¿ventanas cortas?
 python3 feature_search.py --data data/btcusdt_1m_long.csv    # ¿mejores features?
+python3 probe_history_api.py       # ¿hay historial de precios en la API?
+python3 chainlink_vs_klines.py     # ¿etiqueta bien el backtest?
 python3 predict_next.py        # predice la proxima vela de 5 min
 python3 predict_next.py --loop # se queda prediciendo cada ronda
 ```
