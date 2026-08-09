@@ -32,6 +32,7 @@ import csv
 import json
 import math
 import os
+import sys
 import time
 from datetime import datetime, timezone
 
@@ -300,14 +301,20 @@ def report(m, target_ms, p_up, feats, price_now, firme):
 def one_shot(m, wait):
     target = next_boundary_ms()
     if wait:
+        # The countdown redraws one line with \r and no newline, which is right
+        # for a terminal and wrong for anything reading line by line -- run_all.py
+        # would block waiting for a newline that never arrives. Off when piped.
+        spinner = sys.stdout.isatty()
         while True:
             faltan = target / 1000 - time.time()
             if faltan <= 2:
                 break
-            print(f"\r  esperando el borde de ronda... {int(faltan)//60}:{int(faltan)%60:02d}   ",
-                  end="", flush=True)
+            if spinner:
+                print(f"\r  esperando el borde de ronda... "
+                      f"{int(faltan)//60}:{int(faltan)%60:02d}   ", end="", flush=True)
             time.sleep(min(10, max(1, faltan - 2)))
-        print("\r" + " " * 50 + "\r", end="")
+        if spinner:
+            print("\r" + " " * 50 + "\r", end="")
 
     candles = fetch_candles()
     price = fetch_price()

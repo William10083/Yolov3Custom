@@ -184,6 +184,22 @@ inferior: **0.525**.
 
 ### Como usarlo
 
+**Para recolectar, una sola terminal:**
+
+```bash
+termux-wake-lock          # sin esto Android lo mata al apagar la pantalla
+python3 run_all.py        # predicciones + precios, juntos
+```
+
+`run_all.py` levanta `predict_next.py --loop` y `local_odds_logger.py` en un
+solo proceso, marca cada linea con su origen (`[pred]` / `[odds]`) y reinicia
+el que se caiga con backoff exponencial -- en 4 dias sobre red movil algo se
+va a cortar, y lo peor que puede pasar es un agujero de 6 horas en los datos
+sin que nadie se entere. Si faltan las llaves de Binance arranca igual, solo
+con las predicciones, y lo avisa.
+
+**El resto de las herramientas:**
+
 ```bash
 python3 bulk_fetch.py --months 48          # 4 anios de velas
 python3 predict_model.py --data data/btcusdt_1m_long.csv   # entrena y mide
