@@ -126,6 +126,8 @@ def main():
 
     faltan_llaves = not (os.environ.get("BINANCE_API_KEY")
                          and os.environ.get("BINANCE_API_SECRET"))
+    telegram = bool(os.environ.get("TELEGRAM_BOT_TOKEN")
+                    and os.environ.get("TELEGRAM_CHAT_ID"))
 
     print("=" * 66)
     print("  RECOLECCION UNIFICADA")
@@ -157,6 +159,14 @@ def main():
         print()
         print("  Termux: si no lo hiciste, corre 'termux-wake-lock' en otra")
         print("  sesion o Android va a matar esto al apagar la pantalla.")
+
+    print()
+    if telegram:
+        print("  Telegram: ACTIVO. Avisa cuando el modelo se compromete")
+        print("  (~43 veces al dia). Las rondas sin opinion no se mandan.")
+    else:
+        print("  Telegram: apagado (faltan TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID).")
+        print("  Todo se sigue guardando en los CSV igual.")
 
     print()
     print("  Ctrl+C para parar todo.")

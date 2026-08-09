@@ -26,6 +26,11 @@ Lo importante de como funciona:
     python3 predict_next.py           # una prediccion
     python3 predict_next.py --wait    # espera al borde y da la definitiva
     python3 predict_next.py --loop    # se queda prediciendo cada ronda
+
+Si TELEGRAM_BOT_TOKEN y TELEGRAM_CHAT_ID estan en el entorno, avisa por
+Telegram cada vez que se compromete -- unas 43 veces al dia. Las rondas sin
+opinion NO se mandan: serian ~245 mensajes diarios y volverian el canal
+inservible justo para lo que sirve.
 """
 import argparse
 import csv
@@ -49,6 +54,12 @@ LOG_HEADER = [
 ]
 KLINES = "https://data-api.binance.vision/api/v3/klines"
 TICKER = "https://data-api.binance.vision/api/v3/ticker/price"
+
+# Telegram es opcional y se activa solo si las dos variables estan en el
+# entorno. El token NUNCA va en el codigo -- se exporta, idealmente desde
+# ~/.btc_env, y nunca se pega en un chat.
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 SYMBOL = "BTCUSDT"
 ROUND_MS = 5 * 60 * 1000
 
@@ -240,6 +251,67 @@ def show_tally(rows):
     print()
 
 
+def enviar_telegram(texto):
+    """Manda el aviso si hay credenciales. Nunca revienta: que falle el canal
+    no puede tumbar la recoleccion, que es lo que de verdad importa."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return False
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            data={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": texto,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": "true",
+            },
+            timeout=15,
+        )
+        if r.status_code != 200:
+            print(f"  [telegram {r.status_code}: {r.text[:120]}]")
+            return False
+        return True
+    except Exception as exc:
+        print(f"  [telegram falló: {exc}]")
+        return False
+
+
+def resumen_historial(rows):
+    """Aciertos acumulados, para que cada aviso llegue con su propio contexto."""
+    done = [r for r in rows if r["correct"] in ("True", "False")]
+    if not done:
+        return "sin historial todavía"
+    hits = sum(1 for r in done if r["correct"] == "True")
+    n = len(done)
+    return f"{hits}/{n} = {hits/n*100:.0f}%"
+
+
+def mensaje_telegram(m, target_ms, lado, conf, price, feats, rows):
+    ts = datetime.fromtimestamp(target_ms / 1000, tz=timezone.utc)
+    fin = datetime.fromtimestamp((target_ms + ROUND_MS) / 1000, tz=timezone.utc)
+    flecha = "🟢 UP" if lado == "Up" else "🔴 DOWN"
+
+    lineas = [
+        f"<b>{flecha}</b>  ·  confianza {conf*100:.1f}%",
+        f"Ronda {ts:%H:%M}→{fin:%H:%M} UTC  ·  BTC ${price:,.2f}",
+        "",
+        "<b>Por qué:</b>",
+    ]
+    for k, contrib, valor in contributions(m, feats)[:4]:
+        empuja = "Up" if contrib > 0 else "Down"
+        lineas.append(f"· {NOMBRES.get(k, k)}: {valor:.3f} → {empuja}")
+
+    lineas += [
+        "",
+        f"<b>Precio máximo pagable:</b> {conf*0.98:.3f}",
+        f"Si el mercado cobra más que eso por {lado}, no vale la pena.",
+        "",
+        f"Historial propio: {resumen_historial(rows)}",
+        "<i>Cálculo en papel. No es una orden ni una recomendación.</i>",
+    ]
+    return "\n".join(lineas)
+
+
 def next_boundary_ms(now_ms=None):
     now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
     return ((now_ms // ROUND_MS) + 1) * ROUND_MS
@@ -333,8 +405,14 @@ def one_shot(m, wait):
     # and logging one would quietly turn "what the model said" into "what the
     # model said at whatever moment I happened to look".
     if lado and firme:
-        record(target, lado, max(p_up, 1 - p_up), price)
+        conf = max(p_up, 1 - p_up)
+        record(target, lado, conf, price)
         print(f"\n  [anotado en {os.path.basename(LOG)} antes de conocer el resultado]")
+        # Solo se avisa cuando el modelo se compromete. Mandar tambien las
+        # rondas sin opinion serian ~245 mensajes por dia y el canal se
+        # volveria inservible justo para lo que sirve.
+        if enviar_telegram(mensaje_telegram(m, target, lado, conf, price, feats, read_log())):
+            print("  [enviado a Telegram]")
 
 
 def main():
