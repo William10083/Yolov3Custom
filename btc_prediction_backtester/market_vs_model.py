@@ -43,6 +43,7 @@ MODEL = os.path.join(HERE, "model.json")
 
 KLINES = "https://data-api.binance.vision/api/v3/klines"
 SYMBOL = "BTCUSDT"
+ROUND_MS_LOCAL = 5 * 60 * 1000
 FEE = 0.02
 STAKE = 10.0
 
@@ -267,6 +268,50 @@ def main():
               f"{marca:>9}")
     if len(conf) > 40:
         print(f"    ... y {len(conf)-40} mas")
+
+    # ------------------------------------------- la verificacion mejor medida
+    # Las 17 rondas de confianza no alcanzan para nada. Pero la direccion que
+    # el modelo prefiere en TODAS las rondas si tiene muestra, y es la unica
+    # forma barata de ver si los 4 anios de historia se trasladan a hoy.
+    print("\n" + "=" * 74)
+    print("TODAS LAS RONDAS: ¿el modelo apunta al lado correcto mas de la mitad?")
+    print("=" * 74)
+    aciertos_todas = sum(
+        1 for j in joined if ((j["p_up"] >= 0.5) == (j["y"] == 1))
+    )
+    pa, la, ha = wilson(aciertos_todas, len(joined))
+    print(f"  {aciertos_todas}/{len(joined)} = {pa*100:.1f}%   IC95% [{la*100:.1f}%, {ha*100:.1f}%]")
+    print(f"  (en 18 meses de walk-forward, opinando siempre, dio 52.1%)")
+    if ha < 0.5:
+        print("  Significativamente por DEBAJO del azar en este periodo.")
+    elif la > 0.5:
+        print("  Significativamente por encima del azar. La señal se traslada.")
+    else:
+        print("  No se distingue del azar en este periodo. Con esta muestra")
+        print("  no se puede confirmar ni descartar que la señal se traslade.")
+
+    # ------------------------------------------------- cuantos datos hay de verdad
+    print("\n" + "=" * 74)
+    print("CUANTA MUESTRA INDEPENDIENTE HAY REALMENTE")
+    print("=" * 74)
+    ordenadas = sorted(conf, key=lambda x: x["t"])
+    episodios = 1
+    for a, b in zip(ordenadas, ordenadas[1:]):
+        if b["t"] - a["t"] > ROUND_MS_LOCAL:
+            episodios += 1
+    span_h = (max(j["t"] for j in joined) - min(j["t"] for j in joined)) / 3600_000
+    print(f"  Rondas de confianza: {len(conf)}")
+    print(f"  Episodios (rondas consecutivas cuentan como uno): {episodios}")
+    print(f"  Periodo cubierto: {span_h:.1f} horas ({span_h/24:.1f} dias)")
+    print()
+    print("  Rondas seguidas comparten estado de mercado y ventanas de features:")
+    print("  no son observaciones independientes. El IC de arriba asume que si,")
+    print("  asi que el intervalo real es todavia MAS ancho que el impreso.")
+    if span_h < 48:
+        print()
+        print("  Y todo esto es de menos de dos dias. El acierto historico se")
+        print("  midio sobre 18 meses. Un dia malo no dice nada del modelo,")
+        print("  igual que un dia bueno no lo confirmaria.")
 
     # --------------------------------------------------------------- paper P&L
     print("\n" + "=" * 74)
