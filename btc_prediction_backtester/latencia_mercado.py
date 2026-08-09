@@ -77,14 +77,18 @@ def num(s):
         return None
 
 
+opens_cache = {}
+
+
 def sigma_por_ronda(inicio_ms, fin_ms):
     """sigma de 1 minuto para cada ronda, de la hora previa a su apertura."""
     opens = {}
     cursor = inicio_ms - 70 * 60_000
-    while cursor <= fin_ms:
+    tope = fin_ms + ROUND_MS + 60_000
+    while cursor <= tope:
         r = requests.get(KLINES, params={
             "symbol": "BTCUSDT", "interval": "1m",
-            "startTime": cursor, "endTime": fin_ms, "limit": 1000}, timeout=30)
+            "startTime": cursor, "endTime": tope, "limit": 1000}, timeout=30)
         r.raise_for_status()
         ks = r.json()
         if not ks:
@@ -94,6 +98,7 @@ def sigma_por_ronda(inicio_ms, fin_ms):
         cursor = int(ks[-1][0]) + 60_000
 
     sig = {}
+    globals()["opens_cache"] = opens
     for s in range(inicio_ms - inicio_ms % ROUND_MS, fin_ms + ROUND_MS, ROUND_MS):
         prev = [opens.get(s - k * 60_000) for k in range(1, 61)]
         prev = [p for p in prev if p]
@@ -223,27 +228,54 @@ def main():
             print("  Esa es exactamente la ventana que explotan los bots.")
 
     print("\n" + "=" * 74)
-    print("3. ¿SE PODRIA GANAR COMPRANDO EL LADO FAVORECIDO?")
+    print("3. ¿SE GANA COMPRANDO EL LADO FAVORECIDO?  (con el resultado REAL)")
     print("=" * 74)
-    print("  Cuando la probabilidad real supera al precio del mercado por mucho,")
-    print("  comprar ese lado tiene EV positivo. Aca esta medido de verdad.\n")
-    print(f"  {'brecha minima':<16}{'oportunidades':>15}{'EV por apuesta':>18}")
-    print("  " + "-" * 49)
+    print("  CUIDADO CON COMO SE MIDE ESTO. La version anterior calculaba el EV")
+    print("  con MI estimacion de probabilidad, sobre casos elegidos justamente")
+    print("  porque mi estimacion era alta. Eso selecciona los casos donde mi")
+    print("  numero esta inflado y devuelve +60% de EV que no existe. Es el")
+    print("  mismo error que ya dio un '+64% EV' falso en este proyecto.")
+    print()
+    print("  Aca se usa el RESULTADO REAL de cada ronda. Sin escapatoria.\n")
+
+    # Resultado real de cada ronda, con la misma regla del mercado.
+    resultados = {}
+    for s in series:
+        a, b = opens_cache.get(s), opens_cache.get(s + ROUND_MS)
+        if a is not None and b is not None and a != b:
+            resultados[s] = 1 if b > a else 0
+
+    print(f"  Rondas con resultado conocido: {len(resultados)} de {len(series)}\n")
+    print(f"  {'brecha':<9}{'oport.':>9}{'rondas':>8}{'acierto':>10}"
+          f"{'precio med':>12}{'EV real':>11}")
+    print("  " + "-" * 59)
     for umbral in (0.03, 0.05, 0.10, 0.15):
-        evs = []
+        apuestas = []
         for s, serie in series.items():
+            y = resultados.get(s)
+            if y is None:
+                continue
             for seg, pr, mid in serie:
-                # Comprar Up cuando el mercado lo subvalua.
                 if pr - mid >= umbral and 0.02 < mid < 0.98:
-                    evs.append(pr * (1 - FEE) / mid - 1)
-                # Comprar Down cuando el mercado subvalua a Down.
+                    apuestas.append((s, mid, y == 1))          # compra Up
                 pdown, mdown = 1 - pr, 1 - mid
                 if pdown - mdown >= umbral and 0.02 < mdown < 0.98:
-                    evs.append(pdown * (1 - FEE) / mdown - 1)
-        if len(evs) < 20:
-            print(f"  {umbral*100:>5.0f} pp{'':<10}{len(evs):>15}{'sin muestra':>18}")
+                    apuestas.append((s, mdown, y == 0))        # compra Down
+        if len(apuestas) < 20:
+            print(f"  {umbral*100:>4.0f} pp{'':<3}{len(apuestas):>9}{'':>8}{'sin muestra':>33}")
             continue
-        print(f"  {umbral*100:>5.0f} pp{'':<10}{len(evs):>15}{statistics.fmean(evs)*100:>+17.1f}%")
+        rondas = len({a[0] for a in apuestas})
+        ok = sum(1 for _, _, g in apuestas if g)
+        precio = statistics.fmean(a[1] for a in apuestas)
+        ev = statistics.fmean(((1 - FEE) / p - 1) if g else -1.0
+                              for _, p, g in apuestas)
+        print(f"  {umbral*100:>4.0f} pp{'':<3}{len(apuestas):>9}{rondas:>8}"
+              f"{ok/len(apuestas)*100:>9.1f}%{precio:>12.3f}{ev*100:>+10.1f}%")
+
+    print()
+    print("  'rondas' importa mas que 'oport.': cada ronda aporta hasta 60 fotos")
+    print("  y todas comparten el mismo resultado, asi que la muestra efectiva")
+    print("  es la de rondas, no la de oportunidades.")
 
     print("\n" + "=" * 74)
     print("AVISO")
