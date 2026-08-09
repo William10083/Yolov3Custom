@@ -21,9 +21,11 @@ Design decisions that matter for the answer being trustworthy:
 import math
 import random
 import statistics
-from collections import defaultdict
 
-import data_fetch
+# data_fetch is imported inside main(), not here: predict_next.py and
+# market_vs_model.py import this module for features_at() alone, and on a
+# phone the historical-download module and its 25 MB cache are neither
+# present nor needed.
 
 ROUND_MS = 5 * 60 * 1000
 
@@ -242,6 +244,8 @@ def evaluate_confident(w, b, data, label, margin):
 
 
 def main():
+    import data_fetch
+
     print("Cargando datos historicos...")
     candles = data_fetch.load_cached()
     rows = build_dataset(candles)
