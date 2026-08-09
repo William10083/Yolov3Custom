@@ -97,6 +97,10 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 # SIGNAL_ALERTS=1 las reactiva, si alguna vez hay razon para hacerlo.
 SEND_SIGNAL_ALERTS = os.environ.get("SIGNAL_ALERTS", "0") == "1"
 
+# El JSON crudo del libro cada 5 s son ~17,000 lineas por dia. Se guarda igual
+# en el CSV, que es donde sirve; en pantalla estorba. VERBOSE=1 lo devuelve.
+VERBOSE_SNAPSHOTS = os.environ.get("VERBOSE", "0") == "1"
+
 REST_BASE = "https://api.binance.com"
 SIGN_MARKET_DATA_CALLS = True  # flip to False if these specific calls reject the signature
 POLL_INTERVAL_SECONDS = 5
@@ -670,6 +674,13 @@ def send_notification(title, html_body, silent=False):
     (if available). Never raises -- a missing/broken channel must not
     interrupt the polling loop; each is wrapped so the others still fire."""
     plain = _strip_html(html_body)
+    if not SEND_SIGNAL_ALERTS:
+        # Imprimir el bloque entero de una señal desacreditada llena la terminal
+        # y tapa lo unico que importa ahora, que es la recoleccion de precios.
+        # Queda una linea para saber que el logger sigue vivo.
+        primera = next((x for x in plain.splitlines() if x.strip()), "")
+        print(f"[señal-vieja/silenciada] {primera[:70]}")
+        return
     print(f"\n{'=' * 60}\n{plain}\n{'=' * 60}\n")
     send_telegram(html_body, silent=silent)
     if silent:
@@ -1377,7 +1388,8 @@ def poll_loop(market_id, current_round, topic):
             resp = get_order_book(market_id, vendor, token_id, condition_id)
             btc_price, price_gap_usd = log_snapshot(market_id, resp, round_start_price)
             if resp.status_code == 200:
-                print(f"[snapshot] {resp.text[:300]}")
+                if VERBOSE_SNAPSHOTS:
+                    print(f"[snapshot] {resp.text[:300]}")
                 try:
                     body = resp.json()
                     snapshot_ts = body.get("timestamp")

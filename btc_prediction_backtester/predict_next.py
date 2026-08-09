@@ -440,6 +440,21 @@ def main():
         print(f"Calificadas {graded} predicciones pendientes.")
     show_tally(rows)
 
+    # Ping de arranque: el modelo se compromete en ~1 de cada 7 rondas, asi que
+    # sin esto habria que esperar media hora sin saber si el canal funciona o
+    # si falto una variable de entorno.
+    if args.loop and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+        ok = enviar_telegram(
+            "🔌 <b>Predictor conectado</b>\n"
+            f"Modelo: {m['trained_on_rounds']:,} rondas · "
+            f"acierto {m.get('accuracy_confident', 0)*100:.1f}%\n"
+            f"Aviso cuando la confianza llegue a "
+            f"{(0.5 + m.get('confidence_margin', 0.05))*100:.0f}% "
+            f"(~1 de cada 7 rondas).\n"
+            f"Historial: {resumen_historial(rows)}"
+        )
+        print("[telegram] canal verificado" if ok else "[telegram] NO se pudo enviar")
+
     if not args.loop:
         one_shot(m, args.wait)
         return
