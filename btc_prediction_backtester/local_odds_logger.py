@@ -122,6 +122,40 @@ LOG_FILE = os.path.join(os.path.dirname(__file__), "data", "live_odds_log.csv")
 DEBUG_LOG_FILE = os.path.join(os.path.dirname(__file__), "data", "raw_api_responses.jsonl")
 
 
+# Binance rechaza una firma cuyo timestamp difiera del reloj del servidor por
+# mas de recvWindow (error -1021). El reloj de un telefono deriva, y cuando
+# cruza el umbral TODAS las llamadas firmadas empiezan a fallar de golpe.
+# La solucion no es confiar en el reloj local: es medir el desfase contra el
+# servidor y compensarlo en cada peticion.
+_offset_servidor_ms = 0
+_ultimo_sync = 0.0
+RECV_WINDOW_MS = 60000  # el maximo que acepta Binance; mas margen ante jitter
+
+
+def sincronizar_reloj(forzar=False):
+    """Desfase entre el reloj del servidor y el local, en milisegundos."""
+    global _offset_servidor_ms, _ultimo_sync
+    if not forzar and time.time() - _ultimo_sync < 300:
+        return _offset_servidor_ms
+    try:
+        t0 = time.time()
+        r = requests.get(f"{REST_BASE}/api/v3/time", timeout=10)
+        t1 = time.time()
+        if r.status_code == 200:
+            servidor = int(r.json()["serverTime"])
+            # El instante local comparable es la mitad del viaje de ida y vuelta.
+            local = (t0 + t1) / 2 * 1000
+            _offset_servidor_ms = int(servidor - local)
+            _ultimo_sync = time.time()
+    except Exception as exc:
+        print(f"[reloj] no se pudo sincronizar: {exc}")
+    return _offset_servidor_ms
+
+
+def ahora_ms() -> int:
+    return int(time.time() * 1000) + _offset_servidor_ms
+
+
 def _sign(params: dict) -> str:
     query_string = urllib.parse.urlencode(sorted(params.items()))
     return hmac.new(
@@ -137,8 +171,9 @@ def api_get(path: str, params: dict = None, signed: bool = None):
     if signed is None:
         signed = SIGN_MARKET_DATA_CALLS
     if signed:
-        params["timestamp"] = str(int(time.time() * 1000))
-        params["recvWindow"] = "5000"
+        sincronizar_reloj()
+        params["timestamp"] = str(ahora_ms())
+        params["recvWindow"] = str(RECV_WINDOW_MS)
         query_string = urllib.parse.urlencode(sorted(params.items()))
         signature = _sign(params)
         url = f"{REST_BASE}{path}?{query_string}&signature={signature}"
