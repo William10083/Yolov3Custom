@@ -182,6 +182,57 @@ en un tramo afortunado y 18 folds mensuales no. Es mas bajo y esta mejor
 medido, y es el que `model.json` declara. Precio maximo pagable con el limite
 inferior: **0.525**.
 
+### ¿Y si se ajusta con los ultimos dias en vez de con 4 anios?
+
+El planteo (del usuario): los 4 anios sirven para entender el mercado en
+general, pero para decidir hoy hay que mirar como se comporto en estos dias.
+
+`short_window_test.py` lo mide dia por dia: para cada uno de los ultimos 120
+dias ajusta el modelo SOLO con los N dias anteriores y predice ese dia. La
+penalizacion l2 se escala con el tamano de la ventana, si no la ventana corta
+perderia por estar sobre-regularizada y no por ser corta.
+
+| pesos ajustados con | acierto (confianza) | dispara |
+|---|---|---|
+| **4 anios** | **55.65%** [54.2, 57.1] | 4,616 |
+| ultimos 90 dias | 55.15% [53.3, 57.0] | 2,807 |
+| ultimos 30 dias | 55.15% [53.6, 56.6] | 4,216 |
+| ultimos 14 dias | 53.45% [52.2, 54.7] | 6,445 |
+| ultimos 7 dias | 52.43% [51.4, 53.4] | 9,651 |
+| ultimos 3 dias | 50.84% [50.1, 51.6] | 16,161 |
+
+Monotono: cuanto mas corta la ventana, peor. La columna de disparos explica
+por que -- con 3 dias (860 rondas) para estimar 15 pesos, el modelo se cree
+seguro 16,161 veces y acierta 50.84%. Esta ajustando ruido reciente y
+llamandolo conviccion.
+
+**Pero 90 dias rinde igual que 4 anios** (-0.51 pp, z = -0.43). No hacen falta
+4 anios: hace falta muestra suficiente para 15 parametros, y eso son ~30 dias
+como piso. Lo importante es que las FEATURES siempre miden el mercado del
+momento en las dos configuraciones; lo que se prueba aca es de donde salen
+los pesos.
+
+### Buscar mejores features (`feature_search.py`)
+
+Se habia probado un unico conjunto de 15 features y nunca se busco algo mejor.
+Se agregaron 20 candidatas, evaluadas **solo contra validacion**, con el test
+sin tocar:
+
+| conjunto | validacion (confianza) |
+|---|---|
+| base (las 15 actuales) | 53.30% |
+| + movimientos normalizados por volatilidad | 53.38% (+0.08 pp) |
+| + mechas | 53.35% (+0.05 pp) |
+| + posicion en el rango de 15m | 53.34% (+0.03 pp) |
+| + hora del dia | 53.32% (+0.02 pp) |
+
+Ganancias de entre +0.02 y +0.08 pp sobre 9 variantes probadas, con ~0.5
+falsos positivos esperados por azar. **No es mejora, es ruido.** Se incluyo lo
+que mas prometia a priori -- el cociente movimiento/volatilidad, la
+aceleracion del flujo, las mechas de rechazo, la hora del dia -- y nada
+aporta. Caveat: la busqueda usa una submuestra de 100k filas, asi que tiene
+poco poder para detectar mejoras de decimas.
+
 ### Como usarlo
 
 **Para recolectar, una sola terminal:**
@@ -206,7 +257,9 @@ python3 predict_model.py --data data/btcusdt_1m_long.csv   # entrena y mide
 python3 robustness_check.py --data data/btcusdt_1m_long.csv  # los controles
 python3 export_model.py --data data/btcusdt_1m_long.csv      # congela los pesos
 python3 market_vs_model.py     # modelo vs precio real cotizado  ← el que decide
-python3 walk_forward.py --data data/btcusdt_1m_long.csv   # ¿hay que reentrenar?
+python3 walk_forward.py --data data/btcusdt_1m_long.csv      # ¿hay que reentrenar?
+python3 short_window_test.py --data data/btcusdt_1m_long.csv # ¿ventanas cortas?
+python3 feature_search.py --data data/btcusdt_1m_long.csv    # ¿mejores features?
 python3 predict_next.py        # predice la proxima vela de 5 min
 python3 predict_next.py --loop # se queda prediciendo cada ronda
 ```
