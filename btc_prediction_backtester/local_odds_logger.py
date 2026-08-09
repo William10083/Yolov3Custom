@@ -199,9 +199,15 @@ def api_get(path: str, params: dict = None, signed: bool = None):
             + "\n"
         )
 
-    print(f"[api] GET {path} -> {resp.status_code}")
+    # Una linea por peticion exitosa son ~30 por minuto con el medidor de
+    # latencia corriendo, y tapan las predicciones y los informes, que es lo
+    # unico que hay para leer. Los FALLOS siempre se imprimen: son la parte
+    # que exige una decision.
     if resp.status_code != 200:
+        print(f"[api] GET {path} -> {resp.status_code}")
         print(f"       {resp.text[:500]}")
+    elif VERBOSE_SNAPSHOTS:
+        print(f"[api] GET {path} -> 200")
     return resp
 
 
@@ -1440,12 +1446,21 @@ def poll_loop(market_id, current_round, topic):
                     round_start_price, btc_price, bid_size, ask_size,
                 )
                 if edge:
-                    fair_txt = f"{edge['naive_fair']:.2f}" if edge["naive_fair"] is not None else "s/d"
-                    flag = "  [REFERENCIA SOSPECHOSA]" if edge["reference_looks_wrong"] else ""
-                    print(
-                        f"[edge] {edge['side']} a {edge['price']} | valor justo {fair_txt} | "
-                        f"EV {edge['ev']*100:+.1f}%{flag}"
-                    )
+                    # El "valor justo" de esta linea sale de naive_fair_prob(),
+                    # que se midio contra 62 apuestas reales y difiere del
+                    # precio de mercado en 24.9pp. El EV que imprime esta
+                    # construido sobre ese error, asi que mostrarlo solo
+                    # ofrece numeros inventados con formato de analisis.
+                    # SIGNAL_ALERTS=1 lo devuelve junto con las alertas viejas.
+                    if SEND_SIGNAL_ALERTS:
+                        fair_txt = (f"{edge['naive_fair']:.2f}"
+                                    if edge["naive_fair"] is not None else "s/d")
+                        flag = ("  [REFERENCIA SOSPECHOSA]"
+                                if edge["reference_looks_wrong"] else "")
+                        print(
+                            f"[edge] {edge['side']} a {edge['price']} | "
+                            f"valor justo {fair_txt} | EV {edge['ev']*100:+.1f}%{flag}"
+                        )
                     if best_edge_this_round is None or edge["ev"] > best_edge_this_round["ev"]:
                         best_edge_this_round = edge
                 if edge and edge["worth_it"] and not alerted_this_round:
