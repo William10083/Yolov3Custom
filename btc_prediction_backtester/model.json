@@ -101,12 +101,13 @@
   "trained_on_rounds": 252428,
   "trained_until_ms": 1735056000000,
   "confidence_margin": 0.05,
-  "accuracy_confident": 0.5515,
+  "accuracy_confident": 0.5425,
   "accuracy_confident_ci95": [
-    0.5426,
-    0.5604
+    0.5362,
+    0.5489
   ],
-  "accuracy_confident_n": 11936,
-  "trigger_rate": 0.14,
-  "note": "Entrenado con el 60% mas viejo de los datos. Todo lo posterior a trained_until_ms es out-of-sample para este modelo. El acierto declarado se midio sobre el 20% mas reciente, mirado una sola vez."
+  "accuracy_confident_n": 23571,
+  "trigger_rate": 0.15,
+  "note": "Entrenado con el 60% mas viejo de los datos. Todo lo posterior a trained_until_ms es out-of-sample para este modelo. El acierto declarado se midio sobre el 20% mas reciente, mirado una sola vez.",
+  "accuracy_method": "walk-forward mensual: 18 meses (2025-02 a 2026-07), cada mes evaluado con este mismo modelo congelado. Es la politica que se usa en produccion, medida como se usa."
 }

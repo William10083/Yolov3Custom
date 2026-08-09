@@ -51,14 +51,23 @@ def main():
         "trained_on_rounds": len(tr_raw),
         "trained_until_ms": tr_raw[-1]["t"],
         "confidence_margin": 0.05,
-        "accuracy_confident": 0.5515,
-        "accuracy_confident_ci95": [0.5426, 0.5604],
-        "accuracy_confident_n": 11936,
-        "trigger_rate": 0.14,
+        # Medido por walk_forward.py sobre 18 meses, evaluando ESTE modelo
+        # congelado mes a mes -- la politica tal como se usa, no un unico corte
+        # que puede caer en un tramo afortunado.
+        "accuracy_confident": 0.5425,
+        "accuracy_confident_ci95": [0.5362, 0.5489],
+        "accuracy_confident_n": 23571,
+        "trigger_rate": 0.15,
+        "accuracy_method": (
+            "walk-forward mensual: 18 meses (2025-02 a 2026-07), cada mes "
+            "evaluado con este mismo modelo congelado. Es la politica que se "
+            "usa en produccion, medida como se usa."
+        ),
         "note": (
             "Entrenado con el 60% mas viejo de los datos. Todo lo posterior a "
-            "trained_until_ms es out-of-sample para este modelo. El acierto "
-            "declarado se midio sobre el 20% mas reciente, mirado una sola vez."
+            "trained_until_ms es out-of-sample para este modelo. Reentrenarlo "
+            "con datos mas nuevos no mejora nada medible (+0.22 pp, z=0.41): "
+            "ver walk_forward.py."
         ),
     }
     with open(OUT, "w") as f:

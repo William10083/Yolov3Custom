@@ -1,20 +1,25 @@
 """Predice la proxima vela de 5 minutos: Up o Down.
 
-Usa el modelo congelado en model.json -- el mismo que dio 55.2% de acierto
-sobre 11,936 rondas que nunca vio (4 anios de datos), y que aguanto los
-controles de robustness_check.py. Aca no se entrena nada: se cargan los pesos
-y se aplican.
+Usa el modelo congelado en model.json -- el mismo que dio 54.3% de acierto
+en walk-forward sobre 18 meses y 23,571 llamadas, y que aguanto los controles
+de robustness_check.py. Aca no se entrena nada: se cargan los pesos y se
+aplican.
+
+La fecha de entrenamiento se ve vieja (Dic-2024) y no lo es en la practica:
+walk_forward.py comparo este modelo congelado contra reentrenarlo cada mes
+con toda la historia disponible, y la diferencia fue +0.22 pp con z=0.41 --
+indistinguible de cero. El corte viejo no le cuesta acierto.
 
 Lo importante de como funciona:
 
   - Solo se pronuncia cuando la confianza llega al umbral. En el ~86% de las
     rondas el modelo no tiene nada que decir, y decirlo es la respuesta
     correcta. Forzar una opinion en cada ronda es exactamente lo que baja el
-    acierto de 55.2% a 52.1%.
+    acierto de 54.3% a 52.1%.
   - Las features salen de velas cerradas ANTES del inicio de la ronda, asi que
     la prediccion queda firme recien en el borde de los :00/:05/:10. Antes de
     eso es preliminar y lo dice.
-  - 55.2% no es dinero. A un precio de 0.50 deja margen; a 0.55 no deja nada.
+  - 54.3% no es dinero. A un precio de 0.50 deja margen; a 0.55 no deja nada.
     Sin comparar contra el precio cotizado esto es una prediccion, no una
     apuesta -- para eso esta market_vs_model.py.
 
@@ -271,7 +276,7 @@ def report(m, target_ms, p_up, feats, price_now, firme):
     if conf - 0.5 < margin:
         print(f"  SIN OPINION   (confianza {conf*100:.1f}%, hace falta {(0.5+margin)*100:.0f}%)")
         print()
-        print("  El modelo no ve nada en esta ronda. No es un fallo: en el 86% de")
+        print("  El modelo no ve nada en esta ronda. No es un fallo: en el 85% de")
         print("  las rondas no hay señal, y las que se saltan son justamente las")
         print("  que hunden el acierto si uno se obliga a opinar siempre.")
         return None

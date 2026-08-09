@@ -144,11 +144,43 @@ variable continua converge mucho mas rapido que una tasa binaria:
 | que falta medir | rondas de confianza | dias |
 |---|---|---|
 | acierto + precio (lo que se creia) | ~1,409 | ~38 |
-| solo el precio, a ±0.010 | ~178 | **~4.4** |
-| solo el precio, a ±0.005 | ~714 | ~18 |
+| solo el precio, a ±0.010 | ~179 | **~4.1** |
+| solo el precio, a ±0.005 | ~715 | ~17 |
+
+(a la tasa de disparo medida de 15%)
 
 Con las 17 rondas que ya hay: precio medio 0.509 contra un maximo pagable de
 0.532, z = 1.39. Apunta en la direccion correcta y todavia no es concluyente.
+
+### ¿Por que el modelo dice "entrenado hasta Dic-2024" en 2026?
+
+Porque el protocolo entrena con el **60% mas viejo** para que el test sea
+genuinamente no visto. Sobre 4 anios (Ago-2022 a Jul-2026) ese 60% termina en
+Dic-2024, y el test cubre Nov-2025 a Jul-2026.
+
+La pregunta obvia es si un modelo con corte tan viejo pierde vigencia.
+`walk_forward.py` lo mide en vez de suponerlo: para cada uno de los ultimos
+18 meses entrena con todo lo ANTERIOR a ese mes y evalua sobre ese mes.
+Compara tres politicas sobre los mismos meses.
+
+| politica | acierto | rondas |
+|---|---|---|
+| A. congelado (el que se envia) | **54.25%** IC95% [53.62%, 54.89%] | 23,571 |
+| B. reentrenado cada mes con todo | 54.47% IC95% [53.65%, 55.29%] | 14,257 |
+| C. ventana movil de 12 meses | 54.41% IC95% [52.84%, 55.96%] | 3,913 |
+
+**Reentrenar vs congelado: +0.22 pp, z = 0.41.** Indistinguible de cero. El
+corte viejo no cuesta acierto, asi que no hay que rehacer `model.json` cada
+semana. Ademas el congelado dispara mas seguido (23,571 llamadas en 18 meses
+contra 14,257), asi que junta muestra mas rapido al mismo acierto.
+
+**18/18 meses por encima del breakeven.** El peor fue Jul-2025 con 51.00%.
+
+Este 54.25% reemplaza al 55.15% de la seccion anterior como cifra oficial: no
+porque el otro estuviera mal calculado, sino porque un corte unico puede caer
+en un tramo afortunado y 18 folds mensuales no. Es mas bajo y esta mejor
+medido, y es el que `model.json` declara. Precio maximo pagable con el limite
+inferior: **0.525**.
 
 ### Como usarlo
 
@@ -158,6 +190,7 @@ python3 predict_model.py --data data/btcusdt_1m_long.csv   # entrena y mide
 python3 robustness_check.py --data data/btcusdt_1m_long.csv  # los controles
 python3 export_model.py --data data/btcusdt_1m_long.csv      # congela los pesos
 python3 market_vs_model.py     # modelo vs precio real cotizado  ← el que decide
+python3 walk_forward.py --data data/btcusdt_1m_long.csv   # ¿hay que reentrenar?
 python3 predict_next.py        # predice la proxima vela de 5 min
 python3 predict_next.py --loop # se queda prediciendo cada ronda
 ```
