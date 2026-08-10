@@ -468,43 +468,46 @@ bonito con p=0,45 es ruido. Y tiene tres desenlaces, no dos — gana el
 candidato, gana el cero, o empatan — porque "d=0 ajusta mejor" es evidencia
 positiva de que no hay retraso y no un empate.
 
-**El resultado sobre datos reales: no hay desfase.** 268 rondas recuperadas
-(3.754 peticiones para el paseo por ids), 269 fronteras con ticks, 53 de ellas
-con movimiento suficiente para discriminar:
+**El resultado sobre datos reales: no hay desfase.** 329 rondas recuperadas,
+327 fronteras con ticks, 66 de ellas con movimiento suficiente para
+discriminar:
 
 | | |
 |---|---|
 | Desfase estimado | **+0,05 s** |
-| d=0,30s mejor que d=0 | 13 de 31 · p=0,47 |
-| d=0,40s mejor que d=0 | 16 de 40 · p=0,27 |
-| d=0,50s mejor que d=0 | 20 de 53 · p=0,098 |
+| Indistinguibles del minimo | −0,25 s a **+0,25 s** |
+| d=0,30s mejor que d=0 | 16 de 40 · p=0,27 |
+| d=0,40s mejor que d=0 | 20 de 50 · p=0,20 |
+| d=0,50s mejor que d=0 | 25 de 66 · p=0,064 |
 
-Ninguno llega a significativo, y los tres apuntan en la direccion contraria a
-la del articulo: en los tres, d=0 gana mas fronteras que el candidato. El
-precio con el que se liquida el dinero es el de Binance **del mismo
-instante**.
+Ninguno llega a significativo, y los tres apuntan en la direccion **contraria**
+a la del articulo: en los tres, d=0 gana mas fronteras que el candidato. Los
+0,3-0,5 s del articulo quedan ademas **fuera** de la banda indistinguible, que
+al pasar de 53 a 66 fronteras se cerro de [−0,15, +0,50] a [−0,25, +0,25]. El
+precio con el que se liquida el dinero es el de Binance **del mismo instante**.
 
-Un negativo asi solo vale si la muestra podia ver el efecto, y eso se
-comprueba en la misma corrida: se le inyecta un desfase de 0,40 s a esas
-mismas fronteras y el test lo detecta **45 de 45, p<0,0001**. O sea que si la
-ventana del articulo existiera aca, esta muestra la habria visto. No la vio
-porque no esta.
+Un negativo asi solo vale si la muestra podia ver el efecto, y eso se comprueba
+en la misma corrida: se le inyecta un desfase de 0,40 s a esas mismas fronteras
+y el test lo detecta **50 de 50, p<0,0001**. Si la ventana del articulo
+existiera aca, esta muestra la habria visto. No la vio porque no esta.
 
 Dos controles mas de la misma corrida:
 
 - **El oraculo da un solo valor por instante.** El `endPrice` de una ronda y
   el `startPrice` de la siguiente son el mismo instante, y coincidieron al
-  centavo en **267 de 267** fronteras. No hay dos lecturas distintas que
+  centavo en **327 de 327** fronteras. No hay dos lecturas distintas que
   arbitrar entre si.
 - **La ronda no tiene campo de cierre anticipado.** Los unicos campos de
   tiempo son `startDate` y `endDate = startDate + 300 s`.
 
-Y el numero que cierra la idea aunque el desfase apareciera manana: el
-**margen mediano de cierre de una ronda es $13,11**, contra un movimiento de
-BTC en 0,4 s que en los tramos quietos es de centavos y en los movidos llega a
-$4-8 en el p90. Adelantarse cuatro decimas cambia la respuesta en una fraccion
-minima de las rondas, y en el resto uno paga 5,26% de costo por confirmar algo
-que ya sabia.
+Y el numero que cierra la idea aunque el desfase apareciera manana. Regalandole
+al metodo los 0,40 s del articulo: el **margen mediano de cierre es $15,82**,
+mientras que BTC en 0,40 s se mueve $0,00 de mediana y $0,72 en el p90 de los
+tramos movidos. El adelanto puede cambiar la respuesta en **4 de 327 rondas
+(1,2%)**. Aun ganando las cuatro, y aun suponiendo que el mercado esas rondas
+cotice 0,50 mientras uno ya sabe -- las dos cosas a favor -- el techo queda en
+**+1,10% por ronda**, y para cobrarlo hay que ver el tick, decidir y que la
+orden entre entera dentro de 400 ms, contra 1-3 s de ida y vuelta medidos.
 
 Por que da distinto que en el articulo, sin que ninguno de los dos este mal:
 Polymarket cotiza en un lado y **resuelve** contra un feed de Chainlink que
