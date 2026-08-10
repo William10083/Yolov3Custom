@@ -229,6 +229,22 @@ def ticks(desde_ms, hasta_ms, reintentos=3):
     return []
 
 
+def cargar_ticks():
+    if not os.path.exists(TICKS_CACHE):
+        return {}
+    try:
+        with open(TICKS_CACHE) as f:
+            return {int(k): [tuple(x) for x in v] for k, v in json.load(f).items()}
+    except (ValueError, TypeError):
+        return {}
+
+
+def guardar_ticks(cache):
+    os.makedirs(os.path.dirname(TICKS_CACHE), exist_ok=True)
+    with open(TICKS_CACHE, "w") as f:
+        json.dump({str(k): v for k, v in cache.items()}, f)
+
+
 def precio_en(serie, ms):
     """Ultimo trade en o antes de `ms`. None si no hay ninguno antes."""
     lo, hi = 0, len(serie)
@@ -381,6 +397,49 @@ def estimar(observaciones, umbral, etiqueta):
     return mejor[0], usables
 
 
+def poder_de_deteccion(obs, umbral, d_test=0.40):
+    """¿Esta muestra habria VISTO un desfase de d_test, si existiera?
+
+    Sin esto un resultado negativo es ambiguo: no distingue "el oraculo no va
+    atrasado" de "estas fronteras no alcanzan para notarlo". Se le inyecta el
+    desfase a las MISMAS fronteras -- mismos instantes, mismos ticks, mismo
+    filtro -- y se corre el mismo test de signos. Si ahi salta, el negativo
+    sobre los datos reales significa lo que parece."""
+    i0 = REJILLA.index(0.0)
+    ic = REJILLA.index(d_test)
+    gana_c = gana_0 = 0
+    usadas = 0
+    for k, (t_ms, _, serie) in enumerate(obs):
+        mov, vals = poder(serie, t_ms)
+        if mov is None or mov < umbral:
+            continue
+        usadas += 1
+        # Oraculo falso: el precio de hace d_test, con medio centavo de ruido
+        # de spread encima, igual que en --validar.
+        po = vals[ic] + (0.005 if k % 2 else -0.005)
+        e0, ec = abs(po - vals[i0]), abs(po - vals[ic])
+        if ec < e0:
+            gana_c += 1
+        elif e0 < ec:
+            gana_0 += 1
+    n = gana_c + gana_0
+    p = binomial_dos_colas(gana_c, n)
+    print("\n" + "=" * 74)
+    print(f"CONTROL DE POTENCIA: ¿habria visto un desfase de {d_test:.2f} s?")
+    print("=" * 74)
+    print(f"  Se inyecta {d_test:.2f} s a las mismas {usadas} fronteras y se repite el test.")
+    print(f"  d={d_test:.2f}s mejor que d=0 en {gana_c} de {n} · p={p:.4f}")
+    detectado = p < 0.05 and gana_c * 2 > n
+    if detectado:
+        print("  -> La muestra SI puede ver un desfase de ese tamaño. Un")
+        print("     resultado negativo sobre datos reales significa que no lo hay.")
+    else:
+        print("  -> La muestra NO puede ver un desfase de ese tamaño. El")
+        print("     resultado sobre datos reales no dice nada en ningun sentido;")
+        print("     hace falta mas historial antes de concluir.")
+    return detectado
+
+
 # --------------------------------------------------------------------------
 # Validacion sin claves
 # --------------------------------------------------------------------------
@@ -398,13 +457,7 @@ def validar(lag_real, n_fronteras=120):
     # lo que hace falta para saber si el estimador acierta en general y no
     # solo con un numero.
     t = (int(time.time()) - 3600) // ROUND * ROUND * 1000
-    cache = {}
-    if os.path.exists(TICKS_CACHE):
-        try:
-            with open(TICKS_CACHE) as f:
-                cache = {int(k): [tuple(x) for x in v] for k, v in json.load(f).items()}
-        except (ValueError, TypeError):
-            cache = {}
+    cache = cargar_ticks()
     nuevas = 0
 
     obs = []
@@ -431,9 +484,7 @@ def validar(lag_real, n_fronteras=120):
             sys.stdout.flush()
     if nuevas:
         print()
-        os.makedirs(os.path.dirname(TICKS_CACHE), exist_ok=True)
-        with open(TICKS_CACHE, "w") as f:
-            json.dump({str(k): v for k, v in cache.items()}, f)
+        guardar_ticks(cache)
     print(f"  {len(obs)} fronteras ({nuevas} ventanas nuevas, el resto de cache)\n")
 
     r = estimar(obs, umbral=0.01, etiqueta=f"validacion, retraso real {lag_real:.2f}s")
@@ -455,14 +506,19 @@ def valor_del_desfase(rondas, obs, desfase):
     print("\n" + "=" * 74)
     print("SI EXISTIERA, ¿CUANTO VALE?")
     print("=" * 74)
-    if desfase is None or abs(desfase) < 0.05:
-        print("  El desfase medido es 0. No hay ventana que explotar y esta")
-        print("  cuenta no aplica; queda igual para saber que se perderia si")
-        print("  el desfase apareciera mas adelante.")
-        d = 0.40
-        print(f"  Se calcula con {d:.2f}s, el numero del articulo.\n")
-    else:
+    # Siempre se calcula con los 0,40 s del articulo, no con el desfase
+    # medido. Si lo medido es practicamente cero, usarlo hace que la cuenta se
+    # conteste sola: el precio no se mueve en 50 ms, todas las filas dan $0.00
+    # y no se aprende nada. La pregunta util es "si existiera la ventana del
+    # articulo, ¿alcanzaria?", y esa se contesta con el numero del articulo.
+    d = 0.40
+    if desfase is not None and abs(desfase) >= 0.15:
+        print(f"  Se mide con el desfase encontrado ({abs(desfase):.2f} s).\n")
         d = abs(desfase)
+    else:
+        print(f"  El desfase medido es ~0, asi que esta cuenta se hace con los")
+        print(f"  {d:.2f} s del articulo: si ni siquiera esa ventana alcanzara,")
+        print("  la pregunta queda cerrada tambien para el futuro.\n")
 
     # Cuanto se mueve BTC en `d` segundos, medido en las mismas fronteras.
     movs = []
@@ -611,22 +667,31 @@ def main():
 
     print(f"\nBajando ticks de {len(por_frontera)} fronteras "
           f"(±{VENTANA_MS/1000:.0f} s cada una)...")
+    cache = cargar_ticks()
+    nuevas = 0
     obs = []
     for i, (t, lecturas) in enumerate(sorted(por_frontera.items())):
         t_ms = t * 1000
-        serie = ticks(t_ms - VENTANA_MS - 2000, t_ms + VENTANA_MS)
+        serie = cache.get(t_ms)
+        if serie is None:
+            serie = ticks(t_ms - VENTANA_MS - 2000, t_ms + VENTANA_MS)
+            cache[t_ms] = serie
+            nuevas += 1
+            time.sleep(0.10)
         if len(serie) < 5:
             continue
         po = statistics.mean(v for _, v in lecturas)
         obs.append((t_ms, po, serie))
         if (i + 1) % 20 == 0:
-            sys.stdout.write(f"\r  {i+1}/{len(por_frontera)}")
+            sys.stdout.write(f"\r  {i+1}/{len(por_frontera)} ({nuevas} bajadas)")
             sys.stdout.flush()
-        time.sleep(0.10)
     print()
+    if nuevas:
+        guardar_ticks(cache)
 
     r = estimar(obs, umbral=args.umbral,
                 etiqueta="oraculo oficial vs ticks de Binance")
+    detectable = poder_de_deteccion(obs, args.umbral, 0.40)
 
     print("\n" + "=" * 74)
     print("LECTURA")
@@ -640,9 +705,17 @@ def main():
     desfase, usables = r
     if abs(desfase) < 0.10:
         print(f"  El precio con el que se liquida el dinero es el de Binance del")
-        print(f"  mismo instante ({desfase:+.2f} s). No hay ventana de oraculo:")
-        print("  el mecanismo del articulo necesita que la fuente de resolucion")
-        print("  vaya atrasada, y aca no lo esta.")
+        print(f"  mismo instante ({desfase:+.2f} s).")
+        if detectable:
+            print("  Y no es que la muestra sea corta: a estas mismas fronteras")
+            print("  se les inyecto un desfase de 0,40 s y el test lo detecto.")
+            print("  No hay ventana de oraculo. El mecanismo del articulo necesita")
+            print("  que la fuente de resolucion vaya atrasada, y aca no lo esta.")
+        else:
+            print("  Pero el control de potencia dice que esta muestra tampoco")
+            print("  habria visto un desfase de 0,40 s. El resultado es 'no se",
+                  "sabe',")
+            print("  no 'no hay'. Correlo de nuevo con mas rondas.")
     elif desfase > 0:
         print(f"  El oraculo publica el precio de hace {desfase:.2f} s. La ventana")
         print("  del articulo EXISTE aca. Lo que falta comprobar es si se puede")

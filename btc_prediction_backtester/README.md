@@ -468,19 +468,49 @@ bonito con p=0,45 es ruido. Y tiene tres desenlaces, no dos — gana el
 candidato, gana el cero, o empatan — porque "d=0 ajusta mejor" es evidencia
 positiva de que no hay retraso y no un empate.
 
-Falta correrlo con claves sobre rondas reales. El script cachea los precios
-oficiales entre corridas, asi que la muestra se acumula sola. Ademas imprime
-los campos de tiempo de la ronda viva, que es lo que dice si se puede apostar
-en el ultimo segundo: un desfase de decimas no sirve de nada si el mercado
-cierra la apuesta antes.
+**El resultado sobre datos reales: no hay desfase.** 268 rondas recuperadas
+(3.754 peticiones para el paseo por ids), 269 fronteras con ticks, 53 de ellas
+con movimiento suficiente para discriminar:
 
-**El presupuesto de latencia, para tenerlo a mano cuando salga el numero.** Si
-el desfase resulta de 0,4 s, hay que ver el tick, decidir y que la orden entre
-entera dentro de esos 400 ms. Lo medido en este proyecto: ida y vuelta de 1-3 s
-contra esta API desde un telefono, y el libro se pudo leer 0,1 veces por
-segundo. El presupuesto es entre 3 y 30 veces menor que lo que tarda el
-sistema. Encontrar el desfase y poder cobrarlo son dos preguntas distintas, y
-esta seccion contesta solo la primera.
+| | |
+|---|---|
+| Desfase estimado | **+0,05 s** |
+| d=0,30s mejor que d=0 | 13 de 31 · p=0,47 |
+| d=0,40s mejor que d=0 | 16 de 40 · p=0,27 |
+| d=0,50s mejor que d=0 | 20 de 53 · p=0,098 |
+
+Ninguno llega a significativo, y los tres apuntan en la direccion contraria a
+la del articulo: en los tres, d=0 gana mas fronteras que el candidato. El
+precio con el que se liquida el dinero es el de Binance **del mismo
+instante**.
+
+Un negativo asi solo vale si la muestra podia ver el efecto, y eso se
+comprueba en la misma corrida: se le inyecta un desfase de 0,40 s a esas
+mismas fronteras y el test lo detecta **45 de 45, p<0,0001**. O sea que si la
+ventana del articulo existiera aca, esta muestra la habria visto. No la vio
+porque no esta.
+
+Dos controles mas de la misma corrida:
+
+- **El oraculo da un solo valor por instante.** El `endPrice` de una ronda y
+  el `startPrice` de la siguiente son el mismo instante, y coincidieron al
+  centavo en **267 de 267** fronteras. No hay dos lecturas distintas que
+  arbitrar entre si.
+- **La ronda no tiene campo de cierre anticipado.** Los unicos campos de
+  tiempo son `startDate` y `endDate = startDate + 300 s`.
+
+Y el numero que cierra la idea aunque el desfase apareciera manana: el
+**margen mediano de cierre de una ronda es $13,11**, contra un movimiento de
+BTC en 0,4 s que en los tramos quietos es de centavos y en los movidos llega a
+$4-8 en el p90. Adelantarse cuatro decimas cambia la respuesta en una fraccion
+minima de las rondas, y en el resto uno paga 5,26% de costo por confirmar algo
+que ya sabia.
+
+Por que da distinto que en el articulo, sin que ninguno de los dos este mal:
+Polymarket cotiza en un lado y **resuelve** contra un feed de Chainlink que
+vive en otro, y el retraso es entre esas dos cosas. Aca el mercado ES Binance
+y el feed reporta BTCUSDT: la fuente de resolucion y la fuente de precio son
+el mismo libro, asi que no hay entre que dos relojes abrirse una ventana.
 
 ### Como usarlo
 
