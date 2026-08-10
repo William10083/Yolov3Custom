@@ -264,10 +264,19 @@ definen por centavos, donde las dos fuentes se separan.
 
 ### Los empates 50-50, y por que no cambian nada
 
-El 5% de las rondas empata EXACTO en Chainlink -- el feed actualiza por umbral
-de desviacion, asi que en periodos quietos el precio reportado al inicio y al
-final es literalmente el mismo numero. Esas rondas **resuelven 50-50**: pagan
-0.5 por accion, ni 1 ni 0.
+El 5% de las rondas empata EXACTO en Chainlink: el precio reportado al inicio
+y al final es literalmente el mismo numero. Esas rondas **resuelven 50-50**:
+pagan 0.5 por accion, ni 1 ni 0.
+
+> **Correccion.** Aca decia que era porque "el feed actualiza por umbral de
+> desviacion". Eso es la conducta de los *Data Feeds* on-chain de Chainlink, y
+> este no es uno: el `priceFeedId` empieza en `0x0003`, que identifica
+> **Chainlink Data Streams, esquema Crypto Advanced v3** -- un producto pull,
+> sub-segundo, que agrega libro de varios venues y publica un mid de consenso
+> (de ahi los 3 decimales). Data Streams no tiene umbral de desviacion. La
+> explicacion estaba inventada; **por que empatan esas rondas sigue sin
+> medirse**. Lo que si esta medido es que no vienen de un feed atrasado:
+> `chainlink_lag.py` da +0,05 s con la banda cerrada en ±0,25 s.
 
 Suena a que hay que rehacer las cuentas, y no:
 
@@ -509,11 +518,21 @@ cotice 0,50 mientras uno ya sabe -- las dos cosas a favor -- el techo queda en
 **+1,10% por ronda**, y para cobrarlo hay que ver el tick, decidir y que la
 orden entre entera dentro de 400 ms, contra 1-3 s de ida y vuelta medidos.
 
-Por que da distinto que en el articulo, sin que ninguno de los dos este mal:
-Polymarket cotiza en un lado y **resuelve** contra un feed de Chainlink que
-vive en otro, y el retraso es entre esas dos cosas. Aca el mercado ES Binance
-y el feed reporta BTCUSDT: la fuente de resolucion y la fuente de precio son
-el mismo libro, asi que no hay entre que dos relojes abrirse una ventana.
+**Por que da distinto que en el articulo, sin que ninguno de los dos este mal.**
+No es que aca no haya Chainlink -- lo hay, `priceFeedProvider = CHAINLINK`. Es
+que **son dos productos distintos de Chainlink**:
+
+| | el del articulo | el de aca |
+|---|---|---|
+| producto | Data Feeds on-chain | Data Streams v3 (`priceFeedId` empieza en `0x0003`) |
+| como publica | push, por latido y umbral de desviacion | pull, sub-segundo |
+| que reporta | precio de referencia | mid de consenso agregando libro de varios venues |
+| retraso | 0,3-0,5 s, que es el hueco que explota el articulo | **+0,05 s medido, banda ±0,25 s** |
+
+El mecanismo del articulo necesita una fuente de resolucion que se quede
+atras. Los Data Feeds se quedan atras por diseño -- entre actualizaciones el
+numero on-chain es viejo. Data Streams se consulta en el momento. Por eso el
+hueco no aparece aca, y no porque falte el oraculo.
 
 ### Como usarlo
 
