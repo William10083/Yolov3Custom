@@ -399,6 +399,89 @@ walk-forward de 18 meses y controles. El mercado esta bien cotizado y no va
 con retraso explotable. Y aun si ambas cosas fueran mejores, entrar cuesta mas
 que la ventaja entera.
 
+### El desfase del oraculo (`chainlink_lag.py`)
+
+El mecanismo del articulo del MIT es real y es una de las tres cosas que de
+verdad dan plata en estos mercados: Polymarket **resuelve** contra un feed de
+Chainlink, el feed publica con 0,3-0,5 s de atraso respecto del precio real, y
+en esa ventana uno ya sabe el resultado mientras el mercado todavia no. La
+pregunta es si eso pasa tambien aca.
+
+**No hace falta muestrear Chainlink en vivo, y ademas seria peor.** Muestrear
+da una lectura cada tanto con el jitter de la red encima. Pero
+`market/detail` devuelve, para cada ronda pasada, el numero exacto con el que
+el oraculo liquido el dinero (`variantData.startPrice` / `endPrice`). Eso no
+es una muestra del oraculo: **es** el oraculo. Del otro lado, `aggTrades` da
+cada operacion de Binance con marca de milisegundo. Entonces se puede
+preguntar directamente:
+
+    error(d) = precio_del_oraculo(T) - precio_de_Binance(T - d)
+
+y ver donde cae el minimo. Si cae en 0, el oraculo publica el presente. Si
+cae en 0,4 s, la ventana del articulo existe aca.
+
+**Lo que ya acota la respuesta antes de mirar el oraculo.** Con los ticks
+publicos se midio cuanto se mueve BTC en el medio segundo previo a un instante
+cualquiera, en 12 momentos repartidos entre distintos dias y horas:
+
+| regimen | trades/min | \|mov 0,5 s\| mediana | p90 | sin cambio |
+|---|---|---|---|---|
+| quieto (la mayoria) | 72-275 | $0.000 | $0.01 | 66-82% |
+| movido | 750-1000+ | $0.010 | $4.06-8.02 | 44-60% |
+
+En los tramos quietos el precio de hace medio segundo es **literalmente el
+mismo numero**: adelantarse no informa de nada, exista o no el desfase. Toda
+la ventaja de latencia, si la hay, vive en el 10-20% del tiempo en que el
+mercado se mueve — que es exactamente como funciona el arbitraje de latencia
+de verdad, y por eso el script separa los dos regimenes en vez de promediarlos.
+
+**El autotest, y el error que pesco.** Antes de correrlo sobre datos reales,
+`--validar` fabrica un oraculo falso con un retraso conocido a partir de ticks
+reales y comprueba que el estimador lo recupera. La primera version uso la
+**mediana** del error absoluto, por el reflejo habitual de que la mediana es
+la robusta. Con un retraso inventado de 0,40 s devolvio **0,15 s**, y la razon
+se ve en la tabla que imprime: la mediana daba $0.0050 identico en los 61
+desfases de la rejilla. En la mayoria de las fronteras el precio no se movio,
+asi que **todos** los desfases empatan, esas fronteras dominan la mediana y la
+dejan plana. La informacion vive en la minoria que si se movio. La media la
+escucha: su minimo caia exacto en +0,40 s. Es el caso raro donde el promedio
+es lo robusto y la mediana lo fragil, y solo se vio porque habia un autotest
+con la respuesta conocida.
+
+Corregido a la media, el autotest pasa con cuatro retrasos distintos sobre las
+mismas 260 ventanas de ticks reales:
+
+| retraso inventado | estimado | 0,4 s contra 0 s |
+|---|---|---|
+| 0,00 s | **+0,00 s** | 0 de 26 · p<0,0001 → **no**, d=0 ajusta mejor |
+| 0,15 s | **+0,15 s** | 13 de 26 · p=1,00 → empate |
+| 0,40 s | **+0,40 s** | 26 de 26 · p<0,0001 → **si** |
+| 0,90 s | **+0,90 s** | 21 de 26 · p=0,0025 → si |
+
+La fila que mas importa es la primera: con retraso real cero el estimador
+**no inventa** uno, y el test de signos lo rechaza explicitamente. Un medidor
+que solo confirma lo que uno espera encontrar no mide nada.
+
+El que decide no es el dibujo de la curva sino ese **test de signos pareado**:
+frontera por frontera, ¿ajusta mejor 0,4 s que 0 s?, con su p-valor. Un minimo
+bonito con p=0,45 es ruido. Y tiene tres desenlaces, no dos — gana el
+candidato, gana el cero, o empatan — porque "d=0 ajusta mejor" es evidencia
+positiva de que no hay retraso y no un empate.
+
+Falta correrlo con claves sobre rondas reales. El script cachea los precios
+oficiales entre corridas, asi que la muestra se acumula sola. Ademas imprime
+los campos de tiempo de la ronda viva, que es lo que dice si se puede apostar
+en el ultimo segundo: un desfase de decimas no sirve de nada si el mercado
+cierra la apuesta antes.
+
+**El presupuesto de latencia, para tenerlo a mano cuando salga el numero.** Si
+el desfase resulta de 0,4 s, hay que ver el tick, decidir y que la orden entre
+entera dentro de esos 400 ms. Lo medido en este proyecto: ida y vuelta de 1-3 s
+contra esta API desde un telefono, y el libro se pudo leer 0,1 veces por
+segundo. El presupuesto es entre 3 y 30 veces menor que lo que tarda el
+sistema. Encontrar el desfase y poder cobrarlo son dos preguntas distintas, y
+esta seccion contesta solo la primera.
+
 ### Como usarlo
 
 **Para recolectar, una sola terminal:**
@@ -428,6 +511,8 @@ python3 short_window_test.py --data data/btcusdt_1m_long.csv # ¿ventanas cortas
 python3 feature_search.py --data data/btcusdt_1m_long.csv    # ¿mejores features?
 python3 probe_history_api.py       # ¿hay historial de precios en la API?
 python3 chainlink_vs_klines.py     # ¿etiqueta bien el backtest?
+python3 chainlink_lag.py --validar # autotest del medidor de desfase (sin claves)
+python3 chainlink_lag.py --rondas 300  # ¿el oraculo publica con retraso?
 python3 predict_next.py        # predice la proxima vela de 5 min
 python3 predict_next.py --loop # se queda prediciendo cada ronda
 ```
