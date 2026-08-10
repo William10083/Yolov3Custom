@@ -135,11 +135,22 @@ def main():
         slippages.append((real - mid) / mid)
 
     total = sum(estados.values())
+    # Las filas sin libro guardado son cabeceras viejas del CSV, no falta de
+    # liquidez. Meterlas en el denominador hace parecer ilíquido un mercado
+    # que no lo es -- el porcentaje que importa se calcula sobre las filas
+    # que de verdad traen un libro.
+    sin_libro = estados.get("sin libro guardado", 0)
+    con_libro = total - sin_libro
     print("=" * 70)
     print(f"¿SE PUEDE PONER ${APUESTA:.0f} EN CADA MOMENTO?")
     print("=" * 70)
+    if sin_libro:
+        print(f"  Filas sin libro guardado (cabecera vieja): {sin_libro:,} de {total:,}")
+        print(f"  Los porcentajes van sobre las {con_libro:,} que si lo traen.\n")
     for k, v in estados.most_common():
-        print(f"  {k:<48} {v:>7,}  {v/total*100:>5.1f}%")
+        if k == "sin libro guardado":
+            continue
+        print(f"  {k:<48} {v:>7,}  {v/con_libro*100:>5.1f}%")
 
     if profundidad_ask:
         profundidad_ask.sort()
@@ -175,10 +186,20 @@ def main():
     print("LECTURA")
     print("=" * 70)
     ok = estados["se puede ejecutar"]
-    print(f"  De {total:,} momentos, en {ok:,} ({ok/total*100:.1f}%) se podia")
+    print(f"  De {con_libro:,} momentos con libro, en {ok:,} "
+          f"({ok/con_libro*100:.1f}%) se podia")
     print(f"  poner ${APUESTA:.0f} de verdad.")
     print()
-    if ok / total < 0.5:
+    if slippages:
+        costo = FEE + slippages[len(slippages) // 2]
+        print(f"  Costo total por operacion: {costo*100:.2f}%")
+        print(f"  Los margenes medidos en el proyecto, netos de ese costo:")
+        for et, m in (("modelo vs breakeven", 0.018),
+                      ("favorito con sesgo longshot", 0.046),
+                      ("modelo opinando siempre", 0.0207)):
+            print(f"    {et:<32} {m*100:>+5.2f}%  ->  {(m-costo)*100:>+6.2f}%")
+        print()
+    if ok / con_libro < 0.5:
         print("  Menos de la mitad. Y no es un problema de velocidad ni de")
         print("  codigo: en el resto no hay contraparte publicada. Una ventaja")
         print("  que solo se puede tomar en la mitad de los momentos, y encima")

@@ -358,6 +358,47 @@ unico que este mercado tiene bien cotizado. Por eso el techo fue 52-54%, por
 eso ninguno de los siete caminos probados lo movio, y por eso el mercado le
 gana a mi modelo cada vez que discrepan.
 
+### El costo de ejecutar, que nunca se habia medido
+
+Todos los calculos de EV de este repo usaron el punto medio del libro como si
+uno pudiera comprar ahi. No se puede: el mid es un promedio entre la mejor
+oferta de compra y la de venta, y lo que uno paga es el ASK. Que la plataforma
+publique `slippageBps: 1000` -- 10% de tolerancia de slippage -- confirma que
+la ejecucion va contra un libro y no a cuota fija.
+
+`profundidad_libro.py` recorre el libro guardado en 5,924 fotos:
+
+| | |
+|---|---|
+| Se podia ejecutar $10 | **87.6%** |
+| Sin ofertas de venta | 6.9% |
+| Sin ofertas de compra | 5.0% |
+| Libro insuficiente para $10 | 0.5% |
+| Dinero del lado vendedor | mediana **$4,088** |
+
+**La liquidez nunca fue el problema.** Lo que mata el proyecto es el precio:
+
+    fee                        2.00%
+    ejecucion (mediana)        3.26%
+    costo total por operacion  5.26%
+
+Contra los margenes que se encontraron en todo el proyecto:
+
+| margen medido | neto de costos |
+|---|---|
+| modelo vs breakeven, +1.80% | **-3.46%** |
+| favorito con sesgo longshot, +4.60% | **-0.66%** |
+| modelo opinando siempre, +2.07% | **-3.19%** |
+
+Ninguno sobrevive. El mejor de los tres queda en -0.66%, perdiendo, y con una
+varianza que funde la banca antes de que el promedio importe.
+
+Esto cierra el proyecto con una razon concreta, no con un "no encontramos
+nada". El modelo hace lo que puede -- 52-54% out-of-sample, medido con
+walk-forward de 18 meses y controles. El mercado esta bien cotizado y no va
+con retraso explotable. Y aun si ambas cosas fueran mejores, entrar cuesta mas
+que la ventaja entera.
+
 ### Como usarlo
 
 **Para recolectar, una sola terminal:**
