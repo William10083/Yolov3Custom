@@ -1,0 +1,113 @@
+{
+  "keys": [
+    "eff_15",
+    "eff_60",
+    "flow15_x_volrank",
+    "flow_15",
+    "flow_5",
+    "flow_60",
+    "mv15_x_eff15",
+    "mv5_x_volrank",
+    "mv_15",
+    "mv_5",
+    "mv_60",
+    "pos_240",
+    "pos_60",
+    "vol_15",
+    "vol_rank"
+  ],
+  "weights": [
+    0.003243641773553282,
+    -0.0033202040730479112,
+    -0.016039914130669658,
+    0.0014251028673827103,
+    0.0006797115724705617,
+    -0.0027889780423778158,
+    -0.03013894429010939,
+    0.007037499752913958,
+    0.018331422071294057,
+    -0.03531709191476372,
+    0.007011772500428241,
+    -0.05548332377745677,
+    -0.06030270015940043,
+    0.022468796973481222,
+    -0.0060487334973496005
+  ],
+  "bias": 0.0008102236070390321,
+  "standardize": {
+    "eff_15": {
+      "mean": 0.26690617354257656,
+      "std": 0.1958435703470725
+    },
+    "eff_60": {
+      "mean": 0.12417116321729355,
+      "std": 0.09489718597443711
+    },
+    "flow15_x_volrank": {
+      "mean": -0.004574664852466312,
+      "std": 0.04722612572106854
+    },
+    "flow_15": {
+      "mean": 0.489284422949409,
+      "std": 0.08015495851425984
+    },
+    "flow_5": {
+      "mean": 0.48845575202031144,
+      "std": 0.11657545617428787
+    },
+    "flow_60": {
+      "mean": 0.49026155824632894,
+      "std": 0.050581275862986025
+    },
+    "mv15_x_eff15": {
+      "mean": 0.0016990009384713126,
+      "std": 0.1369015326029114
+    },
+    "mv5_x_volrank": {
+      "mean": 0.0002343486255537042,
+      "std": 0.11849053957489425
+    },
+    "mv_15": {
+      "mean": 0.002046559942874344,
+      "std": 0.26032429664172907
+    },
+    "mv_5": {
+      "mean": 0.0006877612268827167,
+      "std": 0.15347323169427274
+    },
+    "mv_60": {
+      "mean": 0.008137319087279866,
+      "std": 0.5147101673024698
+    },
+    "pos_240": {
+      "mean": 0.5197334896506325,
+      "std": 0.2621215354952893
+    },
+    "pos_60": {
+      "mean": 0.5137443706090074,
+      "std": 0.28510193520684735
+    },
+    "vol_15": {
+      "mean": 0.05090136315005058,
+      "std": 0.04286863872037777
+    },
+    "vol_rank": {
+      "mean": 0.478886652827737,
+      "std": 0.3428100346501509
+    }
+  },
+  "l2": 1000.0,
+  "solver": "newton-irls (determinista, sin semilla)",
+  "trained_on_rounds": 252428,
+  "trained_until_ms": 1735056000000,
+  "confidence_margin": 0.05,
+  "accuracy_confident": 0.5425,
+  "accuracy_confident_ci95": [
+    0.5362,
+    0.5489
+  ],
+  "accuracy_confident_n": 23571,
+  "trigger_rate": 0.15,
+  "note": "Entrenado con el 60% mas viejo de los datos. Todo lo posterior a trained_until_ms es out-of-sample para este modelo. El acierto declarado se midio sobre el 20% mas reciente, mirado una sola vez.",
+  "accuracy_method": "walk-forward mensual: 18 meses (2025-02 a 2026-07), cada mes evaluado con este mismo modelo congelado. Es la politica que se usa en produccion, medida como se usa."
+}
